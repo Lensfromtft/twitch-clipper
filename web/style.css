@@ -1,0 +1,398 @@
+/* ---------------------------------------------------------- base --- */
+:root{
+  --bg:#0e0e10;
+  --bg-2:#18181b;
+  --bg-3:#1f1f23;
+  --bg-4:#26262c;
+  --line:#2f2f35;
+  --txt:#efeff1;
+  --muted:#adadb8;
+  --purple:#9147ff;
+  --purple-2:#772ce8;
+  --green:#00c389;
+  --red:#f5426c;
+  --amber:#ffb347;
+  --radius:8px;
+  --mono:"Cascadia Mono",Consolas,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+/* Doit rester avant tout le reste : une regle d'auteur comme
+   .player-placeholder{display:flex} ecrase sinon le [hidden]{display:none}
+   du navigateur, et l'element masque par JS reste affiche. */
+[hidden]{display:none !important}
+html,body{height:100%}
+body{
+  margin:0;background:var(--bg);color:var(--txt);
+  font:14px/1.45 "Inter","Segoe UI",Roboto,system-ui,sans-serif;
+  overflow:hidden;
+}
+h2,h3{margin:0;font-weight:600}
+.muted{color:var(--muted)}
+.small{font-size:12px}
+.mono{font-family:var(--mono)}
+.spacer{flex:1}
+code{font-family:var(--mono);font-size:12px;background:var(--bg-4);padding:1px 5px;border-radius:4px}
+kbd{
+  font-family:var(--mono);font-size:10px;background:var(--bg-4);color:var(--muted);
+  border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 4px;
+}
+
+/* --------------------------------------------------------- boutons --- */
+.btn{
+  background:var(--bg-4);color:var(--txt);border:1px solid transparent;
+  border-radius:var(--radius);padding:8px 12px;font-size:13px;font-weight:600;
+  cursor:pointer;transition:background .12s,transform .08s,opacity .12s;
+  font-family:inherit;white-space:nowrap;
+}
+.btn:hover:not(:disabled){background:#33333b}
+.btn:active:not(:disabled){transform:translateY(1px)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-primary{background:var(--purple)}
+.btn-primary:hover:not(:disabled){background:var(--purple-2)}
+.btn-ghost{background:transparent;border-color:var(--line);color:var(--muted)}
+.btn-ghost:hover:not(:disabled){background:var(--bg-3);color:var(--txt)}
+.btn-sm{padding:4px 8px;font-size:12px}
+.btn-lg{padding:11px 20px;font-size:15px}
+.btn-block{width:100%}
+.btn-icon{padding:6px 9px;line-height:1}
+.btn-mark{background:var(--purple);padding:8px 10px}
+.btn-mark:hover:not(:disabled){background:var(--purple-2)}
+.btn-nudge{background:var(--bg-3);border:1px solid var(--line);padding:4px 7px;font-size:11px;font-weight:500;color:var(--muted)}
+.btn-nudge:hover:not(:disabled){background:var(--bg-4);color:var(--txt)}
+.kbd-inline{margin-left:6px;background:rgba(0,0,0,.25);border-color:rgba(255,255,255,.2);color:#fff}
+
+/* --------------------------------------------------------- champs --- */
+.input{
+  width:100%;background:var(--bg);border:1px solid var(--line);border-radius:var(--radius);
+  color:var(--txt);padding:8px 10px;font:inherit;font-size:13px;outline:none;
+}
+.input:focus{border-color:var(--purple);box-shadow:0 0 0 3px rgba(145,71,255,.18)}
+.select{cursor:pointer;appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 16px) 50%,calc(100% - 11px) 50%;background-size:5px 5px;background-repeat:no-repeat;padding-right:30px}
+.field-label{display:block;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:0 0 5px}
+.row{display:flex;gap:6px}
+.row .input{flex:1}
+.hint{margin:6px 0 0;font-size:11px;color:var(--muted)}
+.check{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--muted);cursor:pointer;user-select:none}
+.check input{accent-color:var(--purple);width:15px;height:15px;cursor:pointer}
+
+/* --------------------------------------------------------- layout --- */
+.topbar{
+  height:52px;display:flex;align-items:center;justify-content:space-between;
+  padding:0 16px;background:var(--bg-2);border-bottom:1px solid var(--line);
+}
+.brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:15px}
+.brand-icon{width:22px;height:22px;fill:var(--purple)}
+.topbar-right{display:flex;align-items:center;gap:8px}
+.pill{font-size:12px;color:var(--muted);background:var(--bg-3);border:1px solid var(--line);padding:4px 10px;border-radius:999px}
+.pill.busy{color:var(--amber);border-color:var(--amber)}
+.pill.err{color:var(--red);border-color:var(--red)}
+
+.layout{
+  height:calc(100% - 52px);
+  display:grid;grid-template-columns:340px minmax(0,1fr) 320px;gap:1px;
+  background:var(--line);
+}
+.panel{background:var(--bg);min-width:0;display:flex;flex-direction:column;overflow:hidden}
+.panel-source{padding:14px;gap:12px}
+.panel-stage{padding:14px 18px;gap:12px;overflow-y:auto}
+.panel-queue{padding:14px;gap:10px}
+
+/* ------------------------------------------------------ colonne 1 --- */
+.chips{display:flex;flex-wrap:wrap;gap:5px}
+.chip{
+  display:inline-flex;align-items:center;gap:2px;
+  background:var(--bg-3);border:1px solid var(--line);border-radius:999px;
+  padding:2px 4px 2px 10px;font-size:12px;color:var(--muted);
+}
+.chip:hover{background:var(--bg-4);color:var(--txt)}
+.chip.is-active{background:rgba(145,71,255,.16);border-color:var(--purple);color:#dcc8ff}
+.chip.is-pinned{border-color:rgba(255,179,71,.5)}
+.chip-name{background:none;border:0;color:inherit;font:inherit;cursor:pointer;padding:1px 2px}
+.chip-pin{
+  background:none;border:0;color:var(--bg-4);cursor:pointer;font-size:12px;
+  line-height:1;padding:2px 4px;border-radius:50%;
+}
+.chip-pin:hover{color:var(--amber)}
+.chip.is-pinned .chip-pin{color:var(--amber)}
+
+.tabs{display:flex;gap:2px;background:var(--bg-2);padding:3px;border-radius:var(--radius)}
+.tab{
+  flex:1;background:transparent;border:0;color:var(--muted);font:inherit;font-size:12px;
+  font-weight:600;padding:6px;border-radius:6px;cursor:pointer;
+}
+.tab:hover{color:var(--txt)}
+.tab.is-active{background:var(--bg-4);color:var(--txt)}
+
+.channel-head{display:flex;align-items:center;gap:9px;padding:2px}
+.channel-head img{width:32px;height:32px;border-radius:50%}
+.channel-head b{font-size:14px}
+
+.vod-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:7px;margin:0 -4px;padding:0 4px}
+.vod-card{
+  display:flex;gap:9px;padding:6px;border-radius:var(--radius);cursor:pointer;
+  background:var(--bg-2);border:1px solid transparent;transition:background .12s,border-color .12s;
+}
+.vod-card:hover{background:var(--bg-3)}
+.vod-card.is-active{border-color:var(--purple);background:rgba(145,71,255,.1)}
+.vod-thumb{position:relative;flex:0 0 104px;height:59px;border-radius:5px;overflow:hidden;background:var(--bg-4)}
+.vod-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.vod-thumb .dur{
+  position:absolute;right:3px;bottom:3px;background:rgba(0,0,0,.8);
+  font-size:10px;padding:1px 4px;border-radius:3px;font-family:var(--mono);
+}
+.vod-info{min-width:0;flex:1;display:flex;flex-direction:column;gap:2px}
+.vod-name{font-size:12.5px;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.vod-sub{font-size:11px;color:var(--muted);display:flex;gap:6px;flex-wrap:wrap}
+.more-wrap{padding-top:2px}
+.direct-form{border-top:1px solid var(--line);padding-top:12px}
+
+.empty{padding:28px 12px;text-align:center;color:var(--muted);font-size:13px}
+.empty p{margin:4px 0}
+
+/* ------------------------------------------------------ colonne 2 --- */
+.vod-header h2{font-size:16px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vod-meta{font-size:12px;margin-top:3px;display:flex;gap:10px;flex-wrap:wrap}
+
+/* Le lecteur prend toute la hauteur laissee libre par les controles : plus de
+   vide sous la page, et pas de debordement non plus puisque les autres lignes
+   gardent leur hauteur naturelle. L'aspect-ratio deduit la largeur de cette
+   hauteur, max-width prend le relais sur les fenetres etroites. */
+.player-wrap{
+  position:relative;background:#000;border-radius:var(--radius);overflow:hidden;
+  flex:1 1 auto;min-height:200px;width:100%;
+  display:flex;align-items:center;justify-content:center;
+}
+/* Deux roles separes, volontairement : le cadre absorbe la hauteur libre
+   (flex), le lecteur garde le 16:9 a l'interieur. Les cumuler sur un seul
+   element fait diverger le calcul de hauteur.
+   Ces valeurs servent de repli : fitPlayer() (app.js) fixe ensuite la taille
+   exacte en pixels, car le CSS seul ne sait pas choisir laquelle des deux
+   contraintes (largeur ou hauteur) est la bonne selon la forme du cadre. */
+.player{aspect-ratio:16/9;width:100%;max-width:100%;max-height:100%}
+.player iframe{width:100%;height:100%;border:0;display:block}
+.player-placeholder{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  text-align:center;color:var(--muted);background:var(--bg-2);
+}
+.player-placeholder p{margin:3px 0}
+.ph-icon{font-size:34px;color:var(--bg-4);margin-bottom:6px}
+
+.scrub{position:relative}
+.scrub-bar{
+  width:100%;-webkit-appearance:none;appearance:none;height:6px;border-radius:3px;
+  background:var(--bg-4);outline:none;cursor:pointer;margin:0;
+}
+.scrub-bar::-webkit-slider-thumb{
+  -webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--purple);
+  border:2px solid var(--bg);cursor:pointer;
+}
+.scrub-bar:disabled{opacity:.5;cursor:default}
+.scrub-marks{position:relative;height:4px;margin-top:2px}
+.mark{position:absolute;top:0;width:2px;height:4px;border-radius:1px;display:none}
+.mark-start{background:var(--green)}
+.mark-end{background:var(--red)}
+.mark-range{position:absolute;top:1px;height:2px;background:rgba(145,71,255,.75);border-radius:1px;display:none}
+.scrub-labels{display:flex;justify-content:space-between;font-size:11px;margin-top:2px}
+
+.cut{display:grid;grid-template-columns:1fr 116px 1fr;gap:12px;align-items:start}
+.cut-col{min-width:0}
+.cut-dur{text-align:center}
+.tc-row{display:flex;gap:5px}
+.tc{flex:1;font-size:14px;letter-spacing:.4px;text-align:center;padding:8px 4px}
+.nudges,.presets{display:flex;gap:3px;margin-top:5px;justify-content:center;flex-wrap:wrap}
+.presets{margin-top:5px}
+
+/* Barre d'action collee en bas du panneau : le bouton Telecharger reste
+   atteignable quelle que soit la hauteur de la fenetre. */
+.actions{
+  display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  position:sticky;bottom:0;z-index:4;background:var(--bg);
+  border-top:1px solid var(--line);padding:10px 0 2px;
+}
+.actions-opts{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.actions-opts .select{width:150px}
+.actions-opts .field-label{margin:0}
+
+.format-toggle{display:flex;gap:2px;background:var(--bg-2);padding:3px;border-radius:var(--radius)}
+.format-toggle .tab{padding:6px 12px;font-size:12px}
+
+/* ------------------------------------------- editeur de composition 9:16 --- */
+.vpanel{border:1px solid var(--line);border-radius:var(--radius);background:var(--bg-2);padding:12px}
+.vpanel[hidden]{display:none !important}
+.vpanel-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.vpanel-head h3{font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+.vpanel-body{display:grid;grid-template-columns:minmax(0,1fr) 150px 210px;gap:14px;align-items:start}
+
+.vframe-wrap{min-width:0}
+.vframe{position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:6px;overflow:hidden;user-select:none}
+.vframe img{width:100%;height:100%;object-fit:contain;display:block;pointer-events:none}
+.vframe-state{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  text-align:center;padding:12px;color:var(--muted);font-size:12px;background:var(--bg-3);
+}
+.vframe-state[hidden]{display:none !important}
+
+.vbox{position:absolute;border:2px solid var(--purple);cursor:move;box-sizing:border-box}
+.vbox-cam{border-color:var(--purple);background:rgba(145,71,255,.14)}
+.vbox-game{border-color:var(--green);background:rgba(0,195,137,.12)}
+.vbox-label{
+  position:absolute;top:-1px;left:-1px;font-size:10px;font-weight:700;padding:1px 6px;
+  background:var(--purple);color:#fff;border-radius:0 0 4px 0;white-space:nowrap;
+}
+.vbox-game .vbox-label{background:var(--green);color:#06231a}
+.vbox-grip{
+  position:absolute;right:-6px;bottom:-6px;width:14px;height:14px;border-radius:3px;
+  background:var(--txt);border:2px solid var(--bg);cursor:nwse-resize;
+}
+
+.vpreview-wrap{text-align:center}
+.vpreview{
+  width:150px;aspect-ratio:9/16;margin:0 auto;background:#000;border-radius:6px;
+  overflow:hidden;display:flex;flex-direction:column;border:1px solid var(--line);
+}
+.vpreview-cam,.vpreview-game{position:relative;overflow:hidden;width:100%}
+.vpreview-cam img,.vpreview-game img{position:absolute;max-width:none;display:block}
+/* Reproduit l'incrustation finale : logo puis nom en blanc ombre. */
+.vpreview-label{
+  position:absolute;left:7px;top:7px;display:flex;align-items:center;gap:4px;
+  color:#fff;font-size:10px;font-weight:700;max-width:88%;
+  text-shadow:0 1px 2px rgba(0,0,0,.8);white-space:nowrap;overflow:hidden;
+}
+.vpreview-label[hidden]{display:none !important}
+.vpreview-logo{
+  position:static !important;width:12px;height:12px;border-radius:3px;flex:0 0 auto;
+}
+.vpreview-logo[hidden]{display:none !important}
+#vprevName{overflow:hidden;text-overflow:ellipsis}
+
+.vcontrols{display:flex;flex-direction:column;gap:4px}
+.vcontrols .field-label{margin-top:8px}
+.vcontrols .field-label:first-child{margin-top:0}
+.vcontrols .btn-block{margin-top:10px}
+.range{
+  width:100%;-webkit-appearance:none;appearance:none;height:5px;border-radius:3px;
+  background:var(--bg-4);outline:none;cursor:pointer;margin:2px 0 0;
+}
+.range::-webkit-slider-thumb{
+  -webkit-appearance:none;width:14px;height:14px;border-radius:50%;
+  background:var(--purple);border:2px solid var(--bg-2);cursor:pointer;
+}
+
+@media (max-width:1100px){
+  .vpanel-body{grid-template-columns:minmax(0,1fr) 150px}
+  .vcontrols{grid-column:1/-1}
+}
+@media (max-width:820px){
+  .vpanel-body{grid-template-columns:minmax(0,1fr)}
+  .vpreview-wrap{display:none}
+}
+
+.actions-buttons{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.btn-playing{background:var(--green);color:#06231a}
+.btn-playing:hover:not(:disabled){background:#00d89a}
+
+.shortcut-grid{
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+  gap:6px 14px;margin-top:8px;font-size:11.5px;color:var(--muted);
+}
+.shortcut-grid kbd{margin-right:2px}
+
+.update-row{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  margin-top:12px;padding-top:10px;border-top:1px solid var(--line);
+}
+.update-row .field-label{margin:0 0 2px}
+.update-result{
+  margin-top:8px;padding:8px;border-radius:6px;background:var(--bg);
+  white-space:pre-wrap;word-break:break-word;line-height:1.5;max-height:150px;overflow:auto;
+}
+.update-result.ok{color:var(--green)}
+.update-result.ko{color:#ffb3c4}
+/* Pastille discrète sur le bouton Réglages quand yt-dlp peut être mis à jour. */
+.has-update{position:relative}
+.has-update::after{
+  content:"";position:absolute;top:4px;right:4px;width:7px;height:7px;
+  border-radius:50%;background:var(--amber);
+}
+.badge-update{
+  display:inline-block;margin-left:6px;padding:1px 6px;border-radius:999px;
+  background:var(--amber);color:#3a2600;font-size:10px;font-weight:700;
+}
+
+.cmd{border:1px solid var(--line);border-radius:var(--radius);background:var(--bg-2);padding:8px 10px}
+.cmd summary{cursor:pointer;font-size:12px;color:var(--muted);user-select:none}
+.cmd-row{display:flex;align-items:flex-start;gap:8px;margin-top:8px}
+.cmd-text{flex:1;background:var(--bg);padding:8px;border-radius:6px;word-break:break-all;line-height:1.5;font-size:11.5px;color:#c9c9d4}
+
+/* ------------------------------------------------------ colonne 3 --- */
+.queue-head{display:flex;align-items:center;justify-content:space-between}
+.queue-head h3{font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+.job-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px}
+.job{background:var(--bg-2);border:1px solid var(--line);border-radius:var(--radius);padding:9px}
+.job.done{border-color:rgba(0,195,137,.45)}
+.job.error{border-color:rgba(245,66,108,.5)}
+.job-top{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+.job-name{font-size:12.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.job-range{font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap}
+.job-sub{font-size:11px;color:var(--muted);margin-top:3px;display:flex;justify-content:space-between;gap:6px}
+.bar{height:5px;background:var(--bg-4);border-radius:3px;overflow:hidden;margin-top:7px}
+.bar span{display:block;height:100%;background:var(--purple);border-radius:3px;transition:width .25s}
+.job.done .bar span{background:var(--green)}
+.job.error .bar span{background:var(--red)}
+.job-actions{display:flex;gap:5px;margin-top:8px;flex-wrap:wrap}
+.job-err{font-size:11px;color:#ffb3c4;margin-top:6px;word-break:break-word;line-height:1.4}
+.job-log{margin-top:6px}
+.job-log summary{font-size:11px;color:var(--muted);cursor:pointer}
+.job-log pre{
+  margin:6px 0 0;padding:7px;background:var(--bg);border-radius:5px;max-height:130px;
+  overflow:auto;font-family:var(--mono);font-size:10.5px;color:var(--muted);white-space:pre-wrap;word-break:break-word;
+}
+
+/* --------------------------------------------------------- modales --- */
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px}
+.modal[hidden]{display:none}
+.modal-card{background:var(--bg-2);border:1px solid var(--line);border-radius:12px;width:min(460px,100%);max-height:90vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.modal-wide{width:min(900px,100%)}
+.modal-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line)}
+.modal-head h3{font-size:15px}
+.modal-body{padding:16px;overflow-y:auto;display:flex;flex-direction:column;gap:4px}
+.modal-body .field-label{margin-top:10px}
+.modal-body .field-label:first-child{margin-top:0}
+.modal-body-flush{padding:0;background:#000}
+.modal-foot{display:flex;align-items:center;gap:8px;padding:12px 16px;border-top:1px solid var(--line)}
+.modal-foot .btn-primary{margin-left:auto}
+.preview-video{width:100%;max-height:62vh;display:block;background:#000}
+.tool-state{margin-top:14px;font-size:11.5px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px;line-height:1.7}
+.ok{color:var(--green)}
+.ko{color:var(--red)}
+
+/* ----------------------------------------------------------- toast --- */
+.toast{
+  position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
+  background:var(--bg-4);border:1px solid var(--line);border-radius:var(--radius);
+  padding:10px 16px;font-size:13px;z-index:60;box-shadow:0 8px 24px rgba(0,0,0,.5);
+  max-width:80vw;
+}
+.toast[hidden]{display:none}
+.toast.ok{border-color:var(--green)}
+.toast.err{border-color:var(--red);color:#ffb3c4}
+
+/* ------------------------------------------------------ responsive --- */
+@media (max-width:1180px){
+  .layout{grid-template-columns:300px minmax(0,1fr);grid-template-rows:1fr auto;height:auto;min-height:calc(100% - 52px)}
+  body{overflow:auto}
+  /* Empilé, la rangée est dimensionnée par son contenu. Une hauteur ferme (et
+     non un minimum) donne au lecteur de l'espace a occuper quand il en reste,
+     et l'oblige a se reduire quand les controles manquent de place. */
+  .panel-stage{height:calc(100vh - 52px)}
+  .panel-queue{grid-column:1/-1;max-height:280px}
+  .job-list{flex-direction:row;flex-wrap:wrap}
+  .job{flex:1 1 260px}
+}
+@media (max-width:820px){
+  .layout{grid-template-columns:minmax(0,1fr)}
+  .panel-source{max-height:420px}
+  .panel-queue{grid-column:auto}
+  .cut{grid-template-columns:1fr}
+  .cut-dur{text-align:left}
+}

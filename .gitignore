@@ -1,0 +1,32 @@
+# --------------------------------------------------------------------------
+#  Donnees privees : ne doivent JAMAIS partir sur un depot distant.
+# --------------------------------------------------------------------------
+cookies.txt
+cookies*.txt
+*.cookies.tmp
+
+# --------------------------------------------------------------------------
+#  Binaires : trop volumineux pour GitHub (ffmpeg et ffprobe font 220 Mo
+#  chacun, la limite est de 100 Mo par fichier) et faciles a retelecharger.
+# --------------------------------------------------------------------------
+yt-dlp.exe
+ffmpeg.exe
+ffprobe.exe
+*.exe
+
+# --------------------------------------------------------------------------
+#  Fichiers produits a l'execution
+# --------------------------------------------------------------------------
+config.json
+clips/
+*.mp4
+*.mkv
+*.m4a
+*.part
+*.ytdl
+
+# Divers
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
