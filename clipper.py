@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Twitch Clipper - interface graphique locale pour decouper des extraits de VOD Twitch.
+Clipper - interface graphique locale pour decouper des extraits de VOD Twitch
+et de videos YouTube.
 
 Lance un petit serveur HTTP sur 127.0.0.1 et ouvre l'interface dans le navigateur.
 Le decoupage est fait par yt-dlp + ffmpeg (executables places a cote de ce script).
@@ -17,8 +18,10 @@ import re
 import secrets
 import shutil
 import socket
+import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -30,8 +33,7 @@ from collections import OrderedDict
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
 YTDLP = os.path.join(BASE_DIR, "yt-dlp.exe")
-FFMPEG = os.path.join(BASE_DIR, "ffmpeg.exe")
-FFPROBE = os.path.join(BASE_DIR, "ffprobe.exe")
+
 
 def is_msix_python():
     """Python installe depuis le Microsoft Store (alias 'App Execution').
@@ -53,13 +55,29 @@ def is_msix_python():
 # trompeuse) ; %LOCALAPPDATA% n'est pas concerne par cette protection.
 # Sous le Python du Store on vise le profil utilisateur, seul emplacement a la
 # fois inaccessible a la redirection MSIX et non protege par Defender.
+DATA_DIR_NAME = "Clipper"
+OLD_DATA_DIR_NAME = "TwitchClipper"   # nom avant le renommage de l'appli
+
 if is_msix_python():
-    APPDATA_DIR = os.path.join(os.path.expanduser("~"), "TwitchClipper")
+    _data_parent = os.path.expanduser("~")
 else:
-    APPDATA_DIR = os.path.join(
-        os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local"),
-        "TwitchClipper")
+    _data_parent = (os.environ.get("LOCALAPPDATA")
+                    or os.path.join(os.path.expanduser("~"), "AppData", "Local"))
+APPDATA_DIR = os.path.join(_data_parent, DATA_DIR_NAME)
 CONFIG_PATH = os.path.join(APPDATA_DIR, "config.json")
+
+
+def migrate_data_dir():
+    """Reprend le dossier de donnees de l'ancien nom, pour ne pas abandonner
+    derriere nous les clips deja telecharges et les reglages."""
+    old = os.path.join(_data_parent, OLD_DATA_DIR_NAME)
+    if os.path.exists(APPDATA_DIR) or not os.path.isdir(old):
+        return
+    try:
+        os.rename(old, APPDATA_DIR)
+        sys.stderr.write("[clipper] dossier de donnees repris depuis %s\n" % old)
+    except OSError:
+        pass
 
 TWITCH_GQL = "https://gql.twitch.tv/gql"
 TWITCH_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"  # client-id public du lecteur web Twitch
@@ -82,9 +100,11 @@ DEFAULT_CONFIG = {
     "vertical_label": True,
     # Decoupes memorisees par chaine : on ne les regle qu'une fois par streamer.
     "layouts": {},
-    "recent_channels": [],
-    "favorites": [],
-    "last_channel": "",
+    # Ranges par plateforme : {"twitch": [...], "youtube": [...]}
+    "recent_channels": {},
+    "favorites": {},
+    "last_channel": {},
+    "platform": "twitch",
 }
 
 _config_lock = threading.Lock()
@@ -120,6 +140,11 @@ def load_config():
             cfg.update(json.load(fh))
     except Exception:
         pass
+    # Un dossier de sortie pointant encore vers l'ancien nom serait recree a
+    # vide a cote des clips existants : on le suit jusqu'au nouveau nom.
+    old_clips = os.path.join(_data_parent, OLD_DATA_DIR_NAME, "clips")
+    if os.path.normcase(cfg.get("output_dir") or "") == os.path.normcase(old_clips):
+        cfg["output_dir"] = os.path.join(APPDATA_DIR, "clips")
     return cfg
 
 
@@ -132,6 +157,7 @@ def save_config(cfg):
         os.replace(tmp, CONFIG_PATH)
 
 
+migrate_data_dir()
 ensure_writable_dir(APPDATA_DIR)
 CONFIG = load_config()
 
@@ -142,6 +168,77 @@ CONFIG = load_config()
 
 def ytdlp_path():
     return CONFIG.get("ytdlp_path") or YTDLP
+
+
+# --------------------------------------------------------------------------- #
+#  Plateformes
+# --------------------------------------------------------------------------- #
+
+PLATFORMS = ("twitch", "youtube")
+RE_YT_ID = re.compile(r"(?:youtu\.be/|[?&]v=|/shorts/|/live/|/embed/)([A-Za-z0-9_-]{11})")
+RE_YT_BARE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+RE_TW_ID = re.compile(r"(?:twitch\.tv/videos/)?v?(\d{6,})")
+
+
+def detect_platform(text, fallback="twitch"):
+    low = str(text or "").lower()
+    if "youtube.com" in low or "youtu.be" in low:
+        return "youtube"
+    if "twitch.tv" in low:
+        return "twitch"
+    return fallback if fallback in PLATFORMS else "twitch"
+
+
+def parse_video_id(value, platform="twitch"):
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if detect_platform(value, platform) == "youtube":
+        match = RE_YT_ID.search(value)
+        if match:
+            return match.group(1)
+        return value if RE_YT_BARE.match(value) else ""
+    match = RE_TW_ID.search(value)
+    return match.group(1) if match else ""
+
+
+def video_url(video_id, platform):
+    if platform == "youtube":
+        return "https://www.youtube.com/watch?v=%s" % video_id
+    return "https://www.twitch.tv/videos/%s" % video_id
+
+
+def channel_url(login, kind, platform):
+    if platform == "youtube":
+        tab = {"archives": "videos", "highlights": "streams", "uploads": "shorts"}.get(kind, "videos")
+        handle = login if login.startswith(("@", "UC", "http")) else "@" + login
+        if handle.startswith("http"):
+            return handle.rstrip("/") + "/" + tab
+        if handle.startswith("UC"):
+            return "https://www.youtube.com/channel/%s/%s" % (handle, tab)
+        return "https://www.youtube.com/%s/%s" % (handle, tab)
+    return "https://www.twitch.tv/%s/videos?filter=%s&sort=time" % (
+        urllib.parse.quote(login), kind)
+
+
+_js_runtime = None
+
+
+def js_runtime_args():
+    """yt-dlp a besoin d'un moteur JavaScript pour deverrouiller les formats
+    YouTube ; sans lui, certains formats manquent et les debits s'effondrent.
+    Node est present sur la plupart des postes, on l'utilise s'il existe."""
+    global _js_runtime
+    if _js_runtime is None:
+        _js_runtime = ["--js-runtimes", "node"] if shutil.which("node") else []
+    return _js_runtime
+
+
+def base_args(platform="twitch"):
+    args = [ytdlp_path(), "--no-warnings", "--no-playlist"]
+    if platform == "youtube":
+        args += js_runtime_args()
+    return args
 
 
 def ffmpeg_dir():
@@ -189,7 +286,7 @@ def ytdlp_latest(force=False):
     try:
         req = urllib.request.Request(
             "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest",
-            headers={"Accept": "application/vnd.github+json", "User-Agent": "TwitchClipper"})
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "Clipper"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             latest = str((json.load(resp) or {}).get("tag_name") or "").strip()
     except Exception:
@@ -235,6 +332,18 @@ def safe_filename(name, maxlen=120):
     return name[:maxlen].strip() or "clip"
 
 
+def work_dir():
+    """Dossier de travail des outils externes. Jamais celui de l'appli : s'il
+    est sous Documents, l'Acces controle aux dossiers de Defender empeche
+    yt-dlp d'y creer ses fichiers temporaires."""
+    folder = os.path.join(tempfile.gettempdir(), "clipper_work")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        return folder
+    except OSError:
+        return tempfile.gettempdir()
+
+
 def run_capture(args, timeout=120):
     """Execute une commande et renvoie (returncode, stdout, stderr)."""
     proc = subprocess.run(
@@ -242,6 +351,7 @@ def run_capture(args, timeout=120):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         creationflags=NO_WINDOW,
+        cwd=work_dir(),
         timeout=timeout,
     )
     return (proc.returncode,
@@ -425,12 +535,56 @@ def list_videos_ytdlp(login, kind="archives", limit=30):
     }
 
 
-def list_videos(login, kind="archives", limit=30, cursor=None):
-    key = (login.lower(), kind, int(limit), cursor or "")
+def list_videos_youtube(login, kind="archives", limit=30):
+    """Liste les videos d'une chaine YouTube via yt-dlp (pas d'API publique
+    equivalente au GraphQL de Twitch)."""
+    url = channel_url(login, kind, "youtube")
+    args = ([ytdlp_path(), "--flat-playlist", "-J", "--no-warnings"] + js_runtime_args()
+            + ["--playlist-items", "1:%d" % int(limit)])
+    out, err, _ = run_ytdlp(args, url, "youtube")
+    out = out.strip()
+    if not out or out == "null":
+        raise LookupError(friendly_error(err) or "Chaine YouTube introuvable : %s" % login)
+    data = json.loads(out)
+    items = []
+    for entry in data.get("entries") or []:
+        if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        thumbs = entry.get("thumbnails") or []
+        items.append({
+            "id": entry["id"],
+            "url": video_url(entry["id"], "youtube"),
+            "title": entry.get("title") or "(sans titre)",
+            "duration": entry.get("duration") or 0,
+            "created_at": None,
+            "views": entry.get("view_count") or 0,
+            "thumbnail": (entry.get("thumbnail")
+                          or (thumbs[0].get("url") if thumbs else "")
+                          or "https://i.ytimg.com/vi/%s/hqdefault.jpg" % entry["id"]),
+            "game": "",
+            "kind": kind,
+        })
+    return {
+        "channel": {"login": login,
+                    "display_name": data.get("channel") or data.get("uploader") or login,
+                    "avatar": ""},
+        "videos": items,
+        "cursor": None,
+        "has_more": False,
+        "source": "yt-dlp",
+        "platform": "youtube",
+    }
+
+
+def list_videos(login, kind="archives", limit=30, cursor=None, platform="twitch"):
+    key = (platform, login.lower(), kind, int(limit), cursor or "")
     cached = cache_get(key)
     if cached:
         return cached
-    if not HTTPS_OK:  # inutile d'essayer : Python n'a pas de support HTTPS ici
+
+    if platform == "youtube":
+        result = list_videos_youtube(login, kind, limit)
+    elif not HTTPS_OK:  # inutile d'essayer : Python n'a pas de support HTTPS ici
         result = list_videos_ytdlp(login, kind, limit)
     else:
         try:
@@ -440,6 +594,7 @@ def list_videos(login, kind="archives", limit=30, cursor=None):
         except Exception as exc:  # API publique indisponible -> repli yt-dlp
             sys.stderr.write("[clipper] GraphQL indisponible (%s), repli yt-dlp\n" % exc)
             result = list_videos_ytdlp(login, kind, limit)
+    result.setdefault("platform", platform)
     cache_put(key, result)
     return result
 
@@ -452,6 +607,36 @@ _vod_cache = {}
 _vod_lock = threading.Lock()
 
 
+def friendly_error(stderr_text):
+    """Traduit les messages yt-dlp les plus frequents en conseil actionnable."""
+    message = ""
+    for line in (stderr_text or "").splitlines():
+        if line.startswith("ERROR:"):
+            message = line.split(":", 1)[1].strip()
+    low = message.lower()
+    if "confirm you" in low and "bot" in low:
+        return ("YouTube demande une authentification (protection anti-robot). "
+                "Exportez vos cookies YouTube dans cookies.txt : le meme fichier "
+                "peut contenir Twitch et YouTube.")
+    if "must be logged into an account" in low:
+        return ("Contenu reserve aux abonnes et aucun cookie valide n'a ete "
+                "transmis. Verifiez cookies.txt (il a peut-etre expire).")
+    if "does not have access" in low:
+        return "Votre compte n'a pas acces a ce contenu reserve aux abonnes."
+    if "private video" in low or "video unavailable" in low:
+        return "Video privee ou indisponible."
+    if "members-only" in low or "join this channel" in low:
+        return "Video reservee aux membres de la chaine."
+    # Chaine absente : arrive surtout quand on cherche un nom de chaine Twitch
+    # alors que l'onglet YouTube est actif (ou l'inverse).
+    if "unable to download api page" in low or "404" in low or "not found" in low:
+        return ("Chaine introuvable. Verifiez l'onglet de plateforme en haut a "
+                "gauche : ce nom existe peut-etre sur l'autre plateforme.")
+    if "does not have a videos tab" in low or "this channel does not have" in low:
+        return "Cette chaine n'a pas d'onglet correspondant a cette categorie."
+    return message
+
+
 def cookies_file():
     """Fichier de cookies effectif ; si le chemin enregistre n'existe plus
     (dossier deplace), on retombe sur le cookies.txt voisin du script."""
@@ -462,30 +647,133 @@ def cookies_file():
     return fallback if os.path.isfile(fallback) else ""
 
 
+COOKIE_JAR = os.path.join(APPDATA_DIR, "cookies.work.txt")
+_cookie_lock = threading.Lock()
+
+
+def cookie_jar():
+    """Copie de travail persistante des cookies, a donner a yt-dlp.
+
+    yt-dlp reecrit son fichier de cookies en fin d'execution : la session
+    Google y tourne a chaque appel. Lui confier directement le cookies.txt de
+    l'utilisateur le modifie sans prevenir ; lui donner une copie jetable perd
+    la rotation, et YouTube finit par repondre "Sign in to confirm you're not
+    a bot". Une copie qui vit dans nos donnees resout les deux : elle encaisse
+    les reecritures, et on la rafraichit des que la source est plus recente.
+    """
+    source = cookies_file()
+    if not source:
+        return ""
+    with _cookie_lock:
+        try:
+            if (not os.path.isfile(COOKIE_JAR)
+                    or os.path.getsize(COOKIE_JAR) < 64
+                    or os.path.getmtime(source) > os.path.getmtime(COOKIE_JAR)):
+                shutil.copyfile(source, COOKIE_JAR)
+            return COOKIE_JAR
+        except OSError:
+            return source
+
+
+def restore_jar():
+    """Remet la copie de travail a l'etat du cookies.txt de l'utilisateur.
+
+    Quand yt-dlp echoue, il reecrit quand meme son fichier de cookies, ampute
+    de ce que le serveur vient de refuser (mesure : 6199 puis 5930 octets).
+    Sans cette remise a plat, chaque echec grignote la copie jusqu'a la rendre
+    inutilisable et l'authentification se degrade toute seule.
+    """
+    source = cookies_file()
+    if not source or not os.path.isfile(COOKIE_JAR):
+        return
+    with _cookie_lock:
+        try:
+            shutil.copyfile(source, COOKIE_JAR)
+        except OSError:
+            pass
+
+
 def cookie_args():
     if not CONFIG.get("use_cookies"):
         return []
-    path = cookies_file()
+    path = cookie_jar()
     return ["--cookies", path] if path else []
 
 
-def vod_info(video_id):
-    video_id = str(video_id).lstrip("vV")
+RE_NEEDS_AUTH = re.compile(
+    r"confirm you|sign in|log in|not a bot|members-only|join this channel|"
+    r"is private|private video|age.restricted|confirm your age|"
+    r"subscriber|--cookies", re.I)
+
+
+def needs_cookies(stderr_text):
+    """YouTube ne reclame une authentification que ponctuellement (protection
+    anti-robot, contenu restreint). On distingue ces cas d'une vraie panne."""
+    return bool(RE_NEEDS_AUTH.search(stderr_text or ""))
+
+
+def attempts_for(platform):
+    """Ordre des tentatives d'authentification.
+
+    Sur Twitch les cookies servent des le depart (VOD reservees aux abonnes).
+    Sur YouTube on commence anonyme : la plupart des videos sont publiques, et
+    rattacher des telechargements repetes a un compte Google expose celui-ci a
+    une restriction. Les cookies ne sortent que si YouTube les exige.
+    """
+    cookies = cookie_args()
+    if platform != "youtube":
+        return [cookies]
+    return [[], cookies] if cookies else [[]]
+
+
+RE_BOT = re.compile(r"not a bot|too many requests|HTTP Error 429|rate.?limit", re.I)
+
+
+def capture_patient(args, timeout=180, essais=3):
+    """run_capture avec reprise sur le controle anti-robot de YouTube.
+
+    Celui-ci se declenche par a-coups sur des appels rapproches et repond en
+    deux secondes : quelques secondes d'attente valent mieux qu'un echec sec.
+    """
+    code, out, err = 1, "", ""
+    for tour in range(essais):
+        code, out, err = run_capture(args, timeout=timeout)
+        if (out.strip() and out.strip() != "null") or not RE_BOT.search(err):
+            return code, out, err
+        if COOKIE_JAR in args:
+            restore_jar()
+        if tour + 1 < essais:
+            time.sleep(3 * (tour + 1))
+    return code, out, err
+
+
+def run_ytdlp(args, url, platform, timeout=180):
+    """Execute yt-dlp en montant l'authentification d'un cran si besoin.
+    Renvoie (stdout, stderr, cookies_utilises)."""
+    out = err = ""
+    for extra in attempts_for(platform):
+        code, out, err = capture_patient(args + extra + [url], timeout=timeout)
+        if out.strip() and out.strip() != "null":
+            return out, err, bool(extra)
+        if not needs_cookies(err):
+            break
+    return out, err, False
+
+
+def vod_info(video_id, platform="twitch"):
+    if platform != "youtube":
+        video_id = str(video_id).lstrip("vV")
+    cache_key = (platform, video_id)
     with _vod_lock:
-        hit = _vod_cache.get(video_id)
+        hit = _vod_cache.get(cache_key)
     if hit and time.time() - hit[0] < CACHE_TTL:
         return hit[1]
 
-    url = "https://www.twitch.tv/videos/%s" % video_id
-    args = [ytdlp_path(), "-J", "--no-warnings", "--no-playlist"] + cookie_args() + [url]
-    code, out, err = run_capture(args, timeout=120)
+    url = video_url(video_id, platform)
+    out, err, _ = run_ytdlp(base_args(platform) + ["-J"], url, platform)
     out = out.strip()
-    if not out:
-        msg = ""
-        for line in err.splitlines():
-            if line.startswith("ERROR:"):
-                msg = line.split(":", 1)[1].strip()
-        raise LookupError(msg or "VOD inaccessible (%s)" % video_id)
+    if not out or out == "null":
+        raise LookupError(friendly_error(err) or "Video inaccessible (%s)" % video_id)
 
     data = json.loads(out)
     qualities, seen = [], set()
@@ -494,10 +782,13 @@ def vod_info(video_id):
         if not height or fmt.get("ext") == "mhtml" or height in seen:
             continue
         seen.add(height)
+        fps = int(fmt.get("fps") or 0)
+        # Libelle calcule plutot que l'identifiant de format : celui de YouTube
+        # est un code interne ("313", "137") illisible pour l'utilisateur.
         qualities.append({
             "height": height,
-            "fps": int(fmt.get("fps") or 0),
-            "label": fmt.get("format_id") or ("%dp" % height),
+            "fps": fps,
+            "label": "%dp%s" % (height, fps if fps >= 50 else ""),
         })
     qualities.sort(key=lambda q: q["height"], reverse=True)
 
@@ -508,14 +799,16 @@ def vod_info(video_id):
         "duration": float(data.get("duration") or 0),
         "timestamp": data.get("timestamp"),
         "upload_date": data.get("upload_date"),
-        "channel": data.get("uploader_id") or data.get("uploader") or "",
-        "channel_name": data.get("uploader") or "",
+        "channel": (data.get("channel") or data.get("uploader_id")
+                    or data.get("uploader") or "").lstrip("@"),
+        "channel_name": data.get("uploader") or data.get("channel") or "",
         "views": data.get("view_count") or 0,
         "thumbnail": data.get("thumbnail") or "",
         "qualities": qualities,
+        "platform": platform,
     }
     with _vod_lock:
-        _vod_cache[video_id] = (time.time(), info)
+        _vod_cache[cache_key] = (time.time(), info)
     return info
 
 
@@ -535,49 +828,137 @@ _stream_cache = {}
 _stream_lock = threading.Lock()
 
 
-def stream_url(video_id):
+def stream_url(video_id, platform="twitch"):
     """URL directe du flux video, mise en cache : l'extraction d'une image de
     reperage doit rester quasi instantanee quand on deplace le curseur."""
+    key = (platform, video_id)
     with _stream_lock:
-        hit = _stream_cache.get(video_id)
+        hit = _stream_cache.get(key)
         if hit and time.time() - hit[0] < 1800:
             return hit[1]
-    args = ([ytdlp_path(), "-g", "--no-warnings", "--no-playlist",
-             "-f", "bv*[height<=1080]/bv*/b"] + cookie_args() +
-            ["https://www.twitch.tv/videos/%s" % video_id])
-    code, out, err = run_capture(args, timeout=120)
+    out, err, _ = run_ytdlp(base_args(platform) + ["-g", "-f", format_selector("1080", platform)],
+                            video_url(video_id, platform), platform)
     url = (out or "").strip().splitlines()
     if not url:
-        msg = ""
-        for line in err.splitlines():
-            if line.startswith("ERROR:"):
-                msg = line.split(":", 1)[1].strip()
-        raise LookupError(msg or "Flux introuvable pour la VOD %s" % video_id)
+        raise LookupError(friendly_error(err) or "Flux introuvable (%s)" % video_id)
     with _stream_lock:
-        _stream_cache[video_id] = (time.time(), url[0])
+        _stream_cache[key] = (time.time(), url[0])
     return url[0]
 
 
-def extract_frame(video_id, seconds):
-    """Une image JPEG a l'instant demande, directement depuis le flux.
+def extract_frame_direct(video_id, seconds, platform):
+    """Saut directement dans le flux distant. Rapide, mais ne fonctionne que si
+    le serveur accepte les requetes par plage (cas de Twitch).
 
     Saut en deux temps : un saut rapide quelques secondes avant, puis un saut
     precis decode depuis l'image-cle. Un saut rapide seul tombe parfois au
     milieu d'un segment et rend une image a moitie noire.
     """
-    seconds = max(0.0, float(seconds))
     lead = min(4.0, seconds)
     args = [ffmpeg_path(), "-hide_banner", "-loglevel", "error",
             "-ss", "%.3f" % (seconds - lead),
-            "-i", stream_url(video_id),
+            "-i", stream_url(video_id, platform),
             "-ss", "%.3f" % lead,
             "-frames:v", "1", "-q:v", "4", "-f", "image2", "-c:v", "mjpeg", "pipe:1"]
     proc = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          creationflags=NO_WINDOW, timeout=180)
-    if not proc.stdout:
-        raise LookupError((proc.stderr or b"").decode("utf-8", "replace").strip()[:200]
-                          or "Image indisponible")
+                          creationflags=NO_WINDOW, timeout=90)
     return proc.stdout
+
+
+def extract_frame_ytdlp(video_id, seconds, platform):
+    """Repli : on fait telecharger un fragment d'une seconde par yt-dlp, puis on
+    en tire une image. Necessaire pour YouTube, dont les URL de flux sont
+    bridees des qu'on les attaque directement avec ffmpeg."""
+    folder = os.path.join(tempfile.gettempdir(), "clipper_frames")
+    os.makedirs(folder, exist_ok=True)
+    base = os.path.join(folder, "f%d" % int(time.time() * 1000))
+    args = (base_args(platform) + [
+        "--ffmpeg-location", ffmpeg_dir(),
+        "--download-sections", "*%.2f-%.2f" % (seconds, seconds + 1.0),
+        "-f", format_selector("720", platform),
+        "-o", base + ".%(ext)s"] + cookie_args() + [video_url(video_id, platform)])
+    run_capture(args, timeout=240)
+
+    produced = None
+    for name in sorted(os.listdir(folder)):
+        if name.startswith(os.path.basename(base)) and not name.endswith((".part", ".ytdl")):
+            produced = os.path.join(folder, name)
+            break
+    if not produced:
+        return b""
+    try:
+        proc = subprocess.run(
+            [ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-i", produced,
+             "-frames:v", "1", "-q:v", "4", "-f", "image2", "-c:v", "mjpeg", "pipe:1"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            creationflags=NO_WINDOW, timeout=90)
+        return proc.stdout
+    finally:
+        try:
+            os.remove(produced)
+        except OSError:
+            pass
+
+
+def extract_frame_fast(video_id, seconds):
+    """Image de reperage YouTube par plages d'octets (meme principe que le
+    telechargement rapide). Quelques secondes, contre plus d'une minute en
+    faisant telecharger un fragment entier par yt-dlp."""
+    pris = None
+    for tentative in range(2):
+        video, _audio = formats_with_auth(video_id, "720")
+        if not video:
+            return b""
+        pris = fetch_span(base_url_of(video), video.get("http_headers"),
+                          seconds, seconds + 0.5, marge=1.0)
+        if pris:
+            break
+        # Les URL memorisees ont pu expirer : on oublie et on redemande une fois.
+        forget_formats(video_id)
+    if not pris:
+        return b""
+    donnees, depart = pris
+    dossier = work_dir()
+    brut = os.path.join(dossier, "frame_%d.mp4" % int(time.time() * 1000))
+    try:
+        with open(brut, "wb") as fh:
+            fh.write(donnees)
+        proc = subprocess.run(
+            [ffmpeg_path(), "-hide_banner", "-loglevel", "error",
+             "-ss", "%.3f" % max(0.0, seconds - depart), "-i", brut,
+             "-frames:v", "1", "-q:v", "4", "-f", "image2", "-c:v", "mjpeg", "pipe:1"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            creationflags=NO_WINDOW, cwd=dossier, timeout=120)
+        return proc.stdout or b""
+    finally:
+        try:
+            os.remove(brut)
+        except OSError:
+            pass
+
+
+def extract_frame(video_id, seconds, platform="twitch"):
+    seconds = max(0.0, float(seconds))
+    if platform == "twitch":
+        image = extract_frame_direct(video_id, seconds, platform)
+        if image:
+            return image
+    else:
+        try:
+            image = extract_frame_fast(video_id, seconds)
+            if image:
+                return image
+        except LookupError:
+            # Refus d'acces : le repli yt-dlp se heurterait au meme mur, en
+            # une minute et demie au lieu de deux secondes. On le dit tout de
+            # suite plutot que de faire patienter pour rien.
+            raise
+        except Exception as exc:
+            sys.stderr.write("[clipper] image rapide indisponible (%s)\n" % exc)
+    image = extract_frame_ytdlp(video_id, seconds, platform)
+    if not image:
+        raise LookupError("Image indisponible a ce timecode.")
+    return image
 
 
 def font_file():
@@ -610,9 +991,17 @@ def clamp_box(box, frame_w, frame_h, fallback):
 RE_LABEL = re.compile(r"[^0-9A-Za-z _.\-]")
 
 
-def logo_file():
-    """Logo optionnel incruste a cote du nom de la chaine."""
-    for name in ("Logo.png", "logo.png"):
+def logo_file(platform="twitch"):
+    """Logo optionnel incruste a cote du nom de la chaine.
+
+    Un logo par plateforme : incruster le logo Twitch sur un extrait YouTube
+    serait faux. Sans fichier correspondant, seul le nom est affiche.
+    """
+    noms = {
+        "twitch": ("Logo.png", "logo.png", "Logo_twitch.png"),
+        "youtube": ("Logo_youtube.png", "logo_youtube.png", "Logo.youtube.png"),
+    }.get(platform, ("Logo.png",))
+    for name in noms:
         path = os.path.join(BASE_DIR, name)
         if os.path.isfile(path):
             return path
@@ -630,11 +1019,23 @@ def vertical_filter(layout, label, frame_w, frame_h, with_logo=False):
     cam_h = even(VERTICAL_H * split)
     game_h = VERTICAL_H - cam_h
 
-    # Memes valeurs de repli que l'interface, mises a l'echelle de la source.
-    sx, sy = frame_w / float(REF_W), frame_h / float(REF_H)
-    scaled = lambda b: (b[0] * sx, b[1] * sy, b[2] * sx, b[3] * sy)
-    cx, cy, cw, ch = clamp_box(layout.get("cam"), frame_w, frame_h, scaled(REF_CAM))
-    gx, gy, gw, gh = clamp_box(layout.get("game"), frame_w, frame_h, scaled(REF_GAME))
+    # Les cadres ont ete traces sur une image de reperage dont la definition
+    # n'est pas forcement celle du clip telecharge (image 720p contre clip
+    # 1080p, ou l'inverse selon la qualite choisie). On les remet a l'echelle
+    # de la source : sans cela le cadrage est faux des que les deux different.
+    ref = layout.get("frame") or (REF_W, REF_H)
+    try:
+        ref_w = float(ref[0]) or REF_W
+        ref_h = float(ref[1]) or REF_H
+    except (TypeError, ValueError, IndexError):
+        ref_w, ref_h = REF_W, REF_H
+    rx, ry = frame_w / ref_w, frame_h / ref_h
+    rescale = lambda b: (b[0] * rx, b[1] * ry, b[2] * rx, b[3] * ry) if b else None
+
+    dx, dy = frame_w / float(REF_W), frame_h / float(REF_H)
+    default = lambda b: (b[0] * dx, b[1] * dy, b[2] * dx, b[3] * dy)
+    cx, cy, cw, ch = clamp_box(rescale(layout.get("cam")), frame_w, frame_h, default(REF_CAM))
+    gx, gy, gw, gh = clamp_box(rescale(layout.get("game")), frame_w, frame_h, default(REF_GAME))
 
     cover = ("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1"
              % (VERTICAL_W, cam_h, VERTICAL_W, cam_h))
@@ -867,7 +1268,7 @@ def _build_output_base(spec):
         name = "{channel}_{date}_{start}-{end}".format(**fields)
     name = safe_filename(name)
 
-    exts = (".mp4", ".mkv", ".m4a", ".webm")
+    exts = (".mp4", ".mkv", ".m4a", ".webm", ".mp3", ".opus")
 
     def taken(candidate):
         return (candidate in _reserved_bases
@@ -883,16 +1284,322 @@ def _build_output_base(spec):
     return base
 
 
-def format_selector(quality):
-    if quality == "audio":
-        return "ba/b"
+AUDIO_QUALITIES = ("audio", "mp3")
+
+
+def format_selector(quality, platform="twitch"):
+    if quality in AUDIO_QUALITIES:
+        # m4a d'abord : l'extension annoncee correspond alors au contenu.
+        return "ba[ext=m4a]/ba/b"
+
+    limit = ""
     if quality and quality != "best":
         try:
-            height = int(str(quality).rstrip("p"))
-            return "bv*[height<=%d]+ba/b[height<=%d]/bv*+ba/b" % (height, height)
+            limit = "[height<=%d]" % int(str(quality).rstrip("p"))
         except ValueError:
-            pass
-    return "bv*+ba/b"
+            limit = ""
+
+    if platform != "youtube":
+        return "bv*%s+ba/b%s/bv*+ba/b" % (limit, limit)
+
+    # Deux preferences propres a YouTube, dans cet ordre :
+    #  - https plutot que HLS : chercher un point precis dans un long manifeste
+    #    HLS oblige ffmpeg a le parcourir (plus de 3 min sur une video d'1 h) ;
+    #  - H.264 + AAC plutot qu'AV1/VP9 + Opus : ces derniers font trebucher
+    #    nombre de lecteurs et de logiciels de montage.
+    return ("bv*[vcodec^=avc1][protocol^=https]%s+ba[acodec^=mp4a]/"
+            "bv*[vcodec^=avc1]%s+ba/"
+            "bv*[protocol^=https]%s+ba/"
+            "b%s/b" % (limit, limit, limit, limit))
+
+
+# --------------------------------------------------------------------------- #
+#  Extraction rapide YouTube : on vise les octets utiles au lieu de laisser
+#  ffmpeg lire le flux depuis son debut.
+#
+#  Mesure a l'origine de ce chemin : un extrait de 30 s pris a 1 h 21 dans une
+#  video de 6 h 33 ne se terminait pas en 15 minutes (ffmpeg transferait 1,2 Go).
+#  En lisant l'index "sidx" du MP4 fragmente, on ne telecharge que 15,6 Mo.
+# --------------------------------------------------------------------------- #
+
+def mp4_boxes(data):
+    """Boites MP4 de premier niveau : [(nom, offset, taille)]."""
+    out, pos = [], 0
+    while pos + 8 <= len(data):
+        size = struct.unpack(">I", data[pos:pos + 4])[0]
+        name = data[pos + 4:pos + 8].decode("ascii", "replace")
+        if size < 8:
+            break
+        out.append((name, pos, size))
+        pos += size
+    return out
+
+
+def http_range(url, headers, start, end, timeout=300):
+    req = urllib.request.Request(
+        url, headers=dict(headers or {}, Range="bytes=%d-%d" % (start, end)))
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def read_sidx(url, headers):
+    """Lit l'index du flux. Renvoie (init, segments) ou None si absent.
+
+    init      : ftyp + moov, sans la boite sidx (son index decrit le fichier
+                complet ; le laisser ferait chercher la suite a 1,2 Go).
+    segments  : [(debut_s, fin_s, offset_octet, taille_octet)]
+    """
+    head = http_range(url, headers, 0, 262143)
+    boxes = mp4_boxes(head)
+    index = {name: (offset, size) for name, offset, size in boxes}
+    if "sidx" not in index or "moov" not in index:
+        return None
+
+    init = b"".join(head[o:o + s] for n, o, s in boxes if n in ("ftyp", "moov"))
+    sidx_off, sidx_size = index["sidx"]
+    body = head[sidx_off + 8:sidx_off + sidx_size]
+    if len(body) < sidx_size - 8:
+        return None
+
+    version = body[0]
+    timescale = struct.unpack(">I", body[8:12])[0] or 1
+    if version == 0:
+        earliest, first_offset = struct.unpack(">II", body[12:20])
+        pos = 20
+    else:
+        earliest, first_offset = struct.unpack(">QQ", body[12:28])
+        pos = 28
+    pos += 2  # reserved
+    count = struct.unpack(">H", body[pos:pos + 2])[0]
+    pos += 2
+
+    segments = []
+    moment = earliest / float(timescale)
+    octet = sidx_off + sidx_size + first_offset
+    for _ in range(count):
+        if pos + 12 > len(body):
+            break
+        ref, duration, _sap = struct.unpack(">III", body[pos:pos + 12])
+        pos += 12
+        taille = ref & 0x7FFFFFFF
+        duree = duration / float(timescale)
+        segments.append((moment, moment + duree, octet, taille))
+        moment += duree
+        octet += taille
+    return (init, segments) if segments else None
+
+
+def fetch_span(url, headers, start, end, marge=2.0):
+    """Telecharge l'init et les seuls segments couvrant [start, end].
+    Renvoie (donnees, instant_de_depart) ou None."""
+    lu = read_sidx(url, headers)
+    if not lu:
+        return None
+    init, segments = lu
+    vises = [s for s in segments if s[1] > start - marge and s[0] < end + marge]
+    if not vises:
+        return None
+    premier, dernier = vises[0], vises[-1]
+    corps = http_range(url, headers, premier[2], dernier[2] + dernier[3] - 1)
+    return init + corps, premier[0]
+
+
+def pick_formats(data, quality):
+    """Meilleur couple (video avc1, audio mp4a) parmi les formats fragmentes."""
+    formats = [f for f in (data.get("formats") or []) if isinstance(f, dict) and f.get("fragments")]
+
+    hauteur = 1080
+    try:
+        hauteur = int(str(quality).rstrip("p"))
+    except (TypeError, ValueError):
+        pass
+
+    videos = [f for f in formats
+              if str(f.get("vcodec") or "").startswith("avc1") and (f.get("height") or 0) <= hauteur]
+    audios = [f for f in formats if f.get("vcodec") == "none"
+              and str(f.get("acodec") or "").startswith("mp4a")]
+    if not videos or not audios:
+        return None, None
+    videos.sort(key=lambda f: (f.get("height") or 0, f.get("tbr") or 0), reverse=True)
+    audios.sort(key=lambda f: f.get("abr") or 0, reverse=True)
+    return videos[0], audios[0]
+
+
+_formats_cache = {}
+_formats_lock = threading.Lock()
+FORMATS_TTL = 3 * 3600          # les URL googlevideo tiennent plusieurs heures
+
+
+def cached_formats(video_id, quality, cookies, essais=3):
+    """youtube_formats avec memoire courte.
+
+    Placer les cadres du mode vertical demande une image de reperage a chaque
+    deplacement du curseur : redemander la liste des formats coutait une dizaine
+    de secondes pour un resultat identique.
+    """
+    cle = (video_id, str(quality))
+    with _formats_lock:
+        trouve = _formats_cache.get(cle)
+    if trouve and time.time() - trouve[0] < FORMATS_TTL:
+        return trouve[1], trouve[2]
+    video, audio = youtube_formats(video_id, quality, cookies, essais)
+    if video and audio:
+        with _formats_lock:
+            _formats_cache[cle] = (time.time(), video, audio)
+    return video, audio
+
+
+def forget_formats(video_id):
+    """A appeler quand une plage d'octets est refusee : les URL ont expire."""
+    with _formats_lock:
+        for cle in [k for k in _formats_cache if k[0] == video_id]:
+            _formats_cache.pop(cle, None)
+
+
+def formats_with_auth(video_id, quality):
+    """Formats fragmentes en montant l'authentification d'un cran si besoin.
+
+    Renvoie (video, audio) ; leve LookupError si YouTube refuse jusqu'au bout.
+    """
+    video = audio = None
+    refus = None
+    auth = attempts_for("youtube")           # anonyme d'abord, cookies ensuite
+    for index, essai in enumerate(auth):
+        # Inutile d'insister en anonyme quand des cookies attendent juste
+        # derriere : passer au cran suivant est plus rapide qu'une reprise.
+        final = index + 1 == len(auth)
+        try:
+            video, audio = cached_formats(video_id, quality, essai,
+                                          essais=3 if final else 1)
+        except LookupError as exc:
+            refus = exc
+            continue
+        if video:
+            return video, audio
+    if refus:
+        raise refus
+    return None, None
+
+
+def youtube_formats(video_id, quality, cookies, essais=3):
+    """Formats fragmentes (video + audio) avec leurs en-tetes d'origine.
+
+    YouTube ne sert pas toujours la meme liste : selon le client retenu par
+    yt-dlp, la reponse retombe parfois a cinq formats sans piste audio mp4a,
+    inexploitables pour une decoupe par plages d'octets (mesure : une fois sur
+    deux). Redemander coute quelques secondes et evite de basculer pour rien
+    sur le telechargement integral.
+    """
+    args = (base_args("youtube") + ["-J", "--extractor-args", "youtube:formats=dashy"]
+            + cookies + [video_url(video_id, "youtube")])
+    err = ""
+    for tour in range(max(1, essais)):
+        code, out, err = capture_patient(args, timeout=240, essais=1)
+        if out.strip() and out.strip() != "null":
+            video, audio = pick_formats(json.loads(out), quality)
+            if video and audio:
+                return video, audio
+            err = ""            # la video existe, c'est la liste qui est pauvre
+        elif not RE_BOT.search(err):
+            break               # vrai refus : insister n'apportera rien
+        elif COOKIE_JAR in args:
+            restore_jar()
+        if tour + 1 < max(1, essais):
+            time.sleep(2 * (tour + 1))
+    if err:
+        raise LookupError(friendly_error(err) or "Formats indisponibles")
+    return None, None
+
+
+def base_url_of(fmt):
+    """URL du flux sans le parametre de plage ajoute par yt-dlp."""
+    frag = (fmt.get("fragments") or [{}])[0]
+    url = frag.get("url") or fmt.get("url") or ""
+    return re.sub(r"[?&]range=[0-9]+-[0-9]+", "", url)
+
+
+def youtube_fast_section(job, spec, start, end, base, cookies):
+    """Chemin rapide YouTube. Renvoie le fichier produit, ou None pour laisser
+    la main a la methode classique."""
+    job.phase = "Preparation"
+    video, audio = cached_formats(spec["video_id"], spec.get("quality"), cookies)
+    if not video or not audio:
+        return None
+
+    job.phase = "Telechargement"
+    morceaux = {}
+    for nom, fmt, marge in (("v", video, 2.0), ("a", audio, 6.0)):
+        if job.canceled:
+            return None
+        pris = fetch_span(base_url_of(fmt), fmt.get("http_headers"), start, end, marge)
+        if not pris:
+            # URL peut-etre perimee : la memoire est purgee pour le prochain essai.
+            forget_formats(spec["video_id"])
+            return None
+        morceaux[nom] = pris
+        bump_progress(job, 40 if nom == "v" else 70)
+
+    if job.canceled:
+        return None
+    brut = {}
+    for nom in ("v", "a"):
+        chemin = "%s.%s.part.mp4" % (base, nom)
+        with open(chemin, "wb") as fh:
+            fh.write(morceaux[nom][0])
+        brut[nom] = chemin
+
+    job.phase = "Finalisation"
+    decalage = max(0.0, start - morceaux["v"][1])
+    cible = base + ".mp4"
+    fusion = base + ".merge.mp4"
+    try:
+        args = [ffmpeg_path(), "-hide_banner", "-loglevel", "error",
+                "-fflags", "+genpts", "-i", brut["v"],
+                "-fflags", "+genpts", "-i", brut["a"],
+                "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
+                "-avoid_negative_ts", "make_zero", "-muxdelay", "0",
+                "-y", fusion]
+        code, out, err = run_capture(args, timeout=600)
+        if code != 0 or not os.path.isfile(fusion):
+            job.add_log("Assemblage rapide impossible : %s" % (err or out)[:120])
+            return None
+
+        args = [ffmpeg_path(), "-hide_banner", "-loglevel", "error",
+                "-ss", "%.3f" % decalage, "-i", fusion,
+                "-t", "%.3f" % (end - start), "-c", "copy",
+                "-movflags", "+faststart", "-y", cible]
+        code, out, err = run_capture(args, timeout=600)
+    finally:
+        # Les fragments bruts doivent partir meme si l'assemblage echoue :
+        # sinon find_output les prendrait pour le clip lors du repli classique.
+        for reste in (brut["v"], brut["a"], fusion):
+            try:
+                os.remove(reste)
+            except OSError:
+                pass
+    if code != 0 or not os.path.isfile(cible) or os.path.getsize(cible) == 0:
+        job.add_log("Decoupe rapide impossible : %s" % (err or out)[:120])
+        return None
+    job.add_log("Extraction rapide : %.1f Mo transferes"
+                % (sum(len(morceaux[n][0]) for n in ("v", "a")) / 1048576.0))
+    bump_progress(job, 99)
+    return cible
+
+
+def prepare_cookies(job, cookies, base):
+    """Arguments d'authentification pour un telechargement.
+
+    cookie_args() pointe deja sur la copie de travail (voir cookie_jar) : on la
+    passe telle quelle pour que la rotation de session operee par yt-dlp serve
+    aux appels suivants. Le cookies.txt de l'utilisateur, lui, n'est jamais
+    ouvert en ecriture. Renvoie (fichier temporaire a supprimer, arguments).
+    """
+    if not cookies:
+        return None, []
+    if not os.path.isfile(cookies[1]):
+        job.add_log("Cookies introuvables : tentative sans authentification.")
+        return None, []
+    return None, list(cookies)
 
 
 def run_job(job):
@@ -905,7 +1612,8 @@ def run_job(job):
     end = float(spec.get("end", 0))
     clip_len = max(0.1, end - start)
     base = build_output_base(spec)
-    audio_only = spec.get("quality") == "audio"
+    audio_only = spec.get("quality") in AUDIO_QUALITIES
+    platform = spec.get("platform") or "twitch"
     if spec.get("vertical"):
         job.span = (0.0, 60.0)  # le montage vertical occupera les 40 % restants
 
@@ -914,68 +1622,129 @@ def run_job(job):
         "--no-warnings", "--no-color", "--newline", "--no-playlist",
         "--ffmpeg-location", ffmpeg_dir(),
         "--download-sections", "*%.2f-%.2f" % (start, end),
-        "-f", format_selector(spec.get("quality")),
+        "-f", format_selector(spec.get("quality"), platform),
         "--retries", "5", "--fragment-retries", "10",
         "-o", base + ".%(ext)s",
         "--progress-template",
         "PROG|%(progress.status)s|%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
-    ]
-    if not audio_only:
+    ] + (js_runtime_args() if platform == "youtube" else [])
+
+    # Titre, auteur, date et URL source dans le fichier : un clip isole reste
+    # identifiable. Pour l'audio on ajoute la vignette en pochette.
+    args.append("--add-metadata")
+    if audio_only:
+        args.append("--embed-thumbnail")
+
+    if spec.get("quality") == "mp3":
+        args += ["-x", "--audio-format", "mp3", "--audio-quality", "0"]
+    elif not audio_only:
         args += ["--merge-output-format", "mp4"]
-    if spec.get("precise"):
+
+    # Note : "--downloader-args ffmpeg_i:-seekable 1" a ete essaye ici, sans
+    # aucun gain mesurable (meme extrait, meme video : les deux variantes
+    # depassent 4 min 40). Le goulot n'est pas la recherche de position mais le
+    # bridage impose par YouTube ("Sleeping N seconds as required by the site"),
+    # qu'aucune option de ffmpeg ne contourne.
+
+    # Les fragments audio font une dizaine de secondes : sans coupe forcee, un
+    # extrait sonore deborde jusqu'a la frontiere du fragment (mesure : 20 s
+    # rendues pour 10 s demandees). On force donc toujours pour l'audio.
+    if spec.get("precise") or audio_only:
         args.append("--force-keyframes-at-cuts")
 
-    # Copie de travail des cookies : yt-dlp reecrit le fichier a la fin de son
-    # execution, on evite ainsi de modifier le cookies.txt de l'utilisateur.
-    tmp_cookies = None
-    cookies = cookie_args()
-    if cookies:
-        candidate = base + ".cookies.tmp"
-        try:
-            shutil.copyfile(cookies[1], candidate)
-            # On ne fait confiance a la copie que si elle est bien la et non vide :
-            # sinon yt-dlp partirait sans authentification, en silence.
-            if os.path.getsize(candidate) > 0:
-                tmp_cookies = candidate
-                args += ["--cookies", tmp_cookies]
-        except Exception:
-            pass
-        if not tmp_cookies:
-            args += cookies
-            job.add_log("Cookies : copie temporaire impossible, "
-                        "utilisation directe de %s" % cookies[1])
-    args.append(spec.get("url") or "https://www.twitch.tv/videos/%s" % spec.get("video_id"))
+    url = spec.get("url") or video_url(spec.get("video_id"), platform)
+    # Sur YouTube on tente d'abord sans cookies (voir attempts_for) ; sur Twitch
+    # ils servent des le depart. La liste donne l'ordre des essais.
+    auth_attempts = attempts_for(platform)
 
     job.add_log('$ yt-dlp --download-sections "*%s-%s" %s' % (
-        hhmmss(start, (":", ":", "")), hhmmss(end, (":", ":", "")), spec.get("url", "")))
-
-    proc = subprocess.Popen(
-        args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        bufsize=0, creationflags=NO_WINDOW, cwd=BASE_DIR)
-    job.proc = proc
+        hhmmss(start, (":", ":", "")), hhmmss(end, (":", ":", "")), url))
 
     error_lines = []
-    pump_output(job, proc, clip_len, error_lines)
+    code = 1
 
-    code = proc.wait()
-    job.proc = None
+    # Chemin rapide YouTube : ne telecharger que les octets de l'extrait.
+    # Reserve a la video (un MP3 se coupe deja vite) et suivi d'un repli
+    # silencieux sur la methode classique si l'index n'est pas exploitable.
+    if platform == "youtube" and not audio_only:
+        for essai in attempts_for(platform):
+            if job.canceled:
+                break
+            try:
+                rapide = youtube_fast_section(job, spec, start, end, base, essai)
+            except Exception as exc:
+                job.add_log("Extraction rapide indisponible : %s" % str(exc)[:110])
+                rapide = None
+            if rapide:
+                job.span = (0.0, 100.0)
+                produced = rapide
+                job.finished = time.time()
+                if spec.get("vertical"):
+                    composed = compose_vertical(job, produced, base, spec, clip_len, error_lines)
+                    if not composed and job.canceled:
+                        break
+                    if not composed:
+                        job.state, job.phase = "error", "Erreur"
+                        job.error = ((error_lines[-1] if error_lines else "Montage vertical impossible.")
+                                     + "  Le clip 16:9 a ete conserve sous le nom %s."
+                                     % os.path.basename(produced))
+                        job.path = produced
+                        job.size = os.path.getsize(produced)
+                        with _base_lock:
+                            _reserved_bases.discard(base)
+                        return
+                    produced = composed
+                job.state, job.phase = "done", "Termine"
+                job.progress = 100.0
+                job.path = produced
+                job.size = os.path.getsize(produced)
+                job.speed = job.eta = ""
+                with _base_lock:
+                    _reserved_bases.discard(base)
+                return
+        if not job.canceled:
+            job.progress = 0.0
+            job.add_log("Repli sur le telechargement classique.")
+    for index, cookies in enumerate(auth_attempts):
+        if job.canceled:
+            break
+        if index:
+            job.add_log("Contenu restreint : nouvelle tentative avec les cookies.")
+            job.progress = 0.0
+        tmp_cookies, extra = prepare_cookies(job, cookies, base)
+        proc = subprocess.Popen(
+            args + extra + [url], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            bufsize=0, creationflags=NO_WINDOW, cwd=work_dir())
+        job.proc = proc
+        pump_output(job, proc, clip_len, error_lines)
+        code = proc.wait()
+        job.proc = None
+        if tmp_cookies:
+            try:
+                os.remove(tmp_cookies)
+            except OSError:
+                pass
+        if code != 0 and extra:
+            restore_jar()   # un echec ampute la copie de travail, voir restore_jar
+        # On ne remonte l'authentification que si l'echec vient bien de la.
+        if code == 0 or not needs_cookies("\n".join(error_lines[-3:])):
+            break
+        cleanup_partial(base)
+
     with _base_lock:
         _reserved_bases.discard(base)  # le fichier produit protege desormais le nom
-    if tmp_cookies:
-        try:
-            os.remove(tmp_cookies)
-        except OSError:
-            pass
 
     produced = find_output(base)
     job.finished = time.time()
 
     if job.canceled:
         job.state, job.phase = "canceled", "Annule"
-        cleanup_partial(base)
+        job.path, job.size = "", 0
+        # Annuler veut dire "ne rien garder" : le clip a moitie ecrit part aussi.
+        cleanup_partial(base, tout=True)
         return
     if produced and os.path.getsize(produced) > 0:
-        if spec.get("vertical"):
+        if spec.get("vertical") and not audio_only:   # pas de montage sur un MP3
             composed = compose_vertical(job, produced, base, spec, clip_len, error_lines)
             if not composed:
                 job.state, job.phase = "error", "Erreur"
@@ -1011,7 +1780,7 @@ def compose_vertical(job, source, base, spec, clip_len, error_lines):
     job.speed = job.eta = ""
 
     frame_w, frame_h = source_size(source)
-    logo = logo_file()
+    logo = logo_file(spec.get("platform") or "twitch")
     graph = vertical_filter(spec.get("layout") or {}, spec.get("label"),
                             frame_w, frame_h, with_logo=bool(logo))
     target = base + ".vertical.mp4"
@@ -1028,15 +1797,24 @@ def compose_vertical(job, source, base, spec, clip_len, error_lines):
     job.add_log("Montage vertical %dx%d" % (VERTICAL_W, VERTICAL_H))
 
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            bufsize=0, creationflags=NO_WINDOW, cwd=BASE_DIR)
+                            bufsize=0, creationflags=NO_WINDOW, cwd=work_dir())
     job.proc = proc
     pump_output(job, proc, clip_len, error_lines)
     code = proc.wait()
     job.proc = None
 
     if job.canceled:
+        try:
+            os.remove(target)
+        except OSError:
+            pass
         return None
     if code != 0 or not os.path.isfile(target) or os.path.getsize(target) == 0:
+        # pump_output ne retient que les lignes reconnues comme des erreurs :
+        # sans ce complement, un echec du montage n'affiche aucune piste.
+        job.add_log("ffmpeg (montage vertical) a quitte avec le code %s" % code)
+        if not error_lines:
+            job.add_log("Filtres : " + graph[:400])
         try:
             os.remove(target)
         except OSError:
@@ -1142,6 +1920,10 @@ def is_useful_line(line):
     return bool(RE_USEFUL.match(line)) or line.startswith(("WARNING:", "$ "))
 
 
+RESIDUS = (".part", ".ytdl", ".cookies.tmp", ".merge.mp4", ".part.mp4", ".tmp")
+MEDIAS = (".mp4", ".mkv", ".m4a", ".mp3", ".webm", ".opus")
+
+
 def find_output(base):
     folder = os.path.dirname(base)
     prefix = os.path.basename(base)
@@ -1151,7 +1933,9 @@ def find_output(base):
     except OSError:
         return None
     for name in names:
-        if not name.startswith(prefix) or name.endswith((".part", ".ytdl", ".cookies.tmp", ".tmp")):
+        # "prefix + point" et pas seulement "prefix" : le base "clip" ne doit
+        # pas ramasser le fichier du base voisin "clip (2)".
+        if not name.startswith(prefix + ".") or name.endswith(RESIDUS):
             continue
         path = os.path.join(folder, name)
         if not os.path.isfile(path):
@@ -1162,7 +1946,13 @@ def find_output(base):
     return best
 
 
-def cleanup_partial(base):
+def cleanup_partial(base, tout=False):
+    """Supprime les residus d'un job. Avec tout=True (annulation), retire aussi
+    le clip lui-meme : un telechargement annule ne doit rien laisser derriere.
+
+    Seuls les noms de la forme base + ".quelquechose" sont acceptes : sinon le
+    base "clip" emporterait les fichiers du base voisin "clip (2)".
+    """
     folder = os.path.dirname(base)
     prefix = os.path.basename(base)
     try:
@@ -1170,7 +1960,9 @@ def cleanup_partial(base):
     except OSError:
         return
     for name in names:
-        if name.startswith(prefix) and name.endswith((".part", ".ytdl", ".cookies.tmp")):
+        if not name.startswith(prefix + "."):
+            continue
+        if name.endswith(RESIDUS) or (tout and name.endswith(MEDIAS)):
             try:
                 os.remove(os.path.join(folder, name))
             except OSError:
@@ -1184,13 +1976,27 @@ def cleanup_partial(base):
 TOKEN = secrets.token_urlsafe(18)
 
 
-def remember_channel(login):
+def per_platform(key, default=None):
+    """Lit une preference rangee par plateforme, en migrant l'ancien format
+    (une simple liste, du temps ou seul Twitch existait)."""
+    value = CONFIG.get(key)
+    if not isinstance(value, dict):
+        value = {"twitch": value} if value else {}
+        CONFIG[key] = value
+    for name in PLATFORMS:
+        value.setdefault(name, [] if default is None else default)
+    return value
+
+
+def remember_channel(login, platform="twitch"):
     if not login:
         return
-    recents = [c for c in CONFIG.get("recent_channels", []) if c.lower() != login.lower()]
-    recents.insert(0, login)
-    CONFIG["recent_channels"] = recents[:12]
-    CONFIG["last_channel"] = login
+    recents = per_platform("recent_channels")
+    kept = [c for c in recents.get(platform, []) if str(c).lower() != login.lower()]
+    kept.insert(0, login)
+    recents[platform] = kept[:12]
+    last = per_platform("last_channel", default="")
+    last[platform] = login
     save_config(CONFIG)
 
 
@@ -1201,13 +2007,18 @@ def config_payload():
     remplace son etat par la reponse, et un POST qui omettrait ces champs lui
     ferait croire que yt-dlp et ffmpeg ont disparu.
     """
+    per_platform("recent_channels")
+    per_platform("favorites")
+    per_platform("last_channel", default="")
     cfg = dict(CONFIG)
     cfg["cookies_present"] = bool(cookies_file())
+    cfg["platforms"] = list(PLATFORMS)
+    cfg["js_runtime"] = bool(js_runtime_args())
     cfg["base_dir"] = BASE_DIR
     cfg["data_dir"] = APPDATA_DIR
     cfg["ytdlp_present"] = os.path.isfile(ytdlp_path())
     cfg["ffmpeg_present"] = os.path.isfile(ffmpeg_path())
-    cfg["logo_present"] = bool(logo_file())
+    cfg["logo_present"] = {p: bool(logo_file(p)) for p in PLATFORMS}
     cfg["default_split"] = DEFAULT_SPLIT
     # Lecture du cache uniquement : la detection tourne en tache de fond au
     # demarrage, cette requete ne doit jamais l'attendre.
@@ -1256,7 +2067,7 @@ def inside_output_dir(path):
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = "TwitchClipper"
+    server_version = "Clipper"
     protocol_version = "HTTP/1.1"
 
     # ---- helpers ---------------------------------------------------------- #
@@ -1308,7 +2119,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == "/" or path == "/index.html":
                 return self.serve_index()
             if path == "/logo.png":
-                logo = logo_file()
+                logo = logo_file((query.get("platform") or ["twitch"])[0])
                 if not logo:
                     return self.json_err(404, "Aucun logo")
                 with open(logo, "rb") as fh:
@@ -1359,33 +2170,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.json_ok(config_payload())
 
         if path == "/api/channel":
-            login = parse_channel(one("login"))
+            platform = detect_platform(one("login"), one("platform", "twitch"))
+            login = parse_channel(one("login"), platform)
             if not login:
                 return self.json_err(400, "Nom de chaine manquant")
             try:
                 data = list_videos(login, one("type", "archives"),
-                                   int(one("limit", "30") or 30), one("cursor") or None)
+                                   int(one("limit", "30") or 30), one("cursor") or None,
+                                   platform)
             except LookupError as exc:
                 return self.json_err(404, exc)
-            remember_channel(data["channel"]["login"])
+            remember_channel(data["channel"]["login"], platform)
             return self.json_ok(data)
 
         if path == "/api/vod":
-            vid = parse_video_id(one("id"))
+            platform = detect_platform(one("id"), one("platform", "twitch"))
+            vid = parse_video_id(one("id"), platform)
             if not vid:
-                return self.json_err(400, "Identifiant de VOD invalide")
+                return self.json_err(400, "Identifiant de video invalide")
             try:
-                info = vod_info(vid)
+                info = vod_info(vid, platform)
             except LookupError as exc:
                 return self.json_err(404, exc)
             return self.json_ok(info)
 
         if path == "/api/frame":
-            vid = parse_video_id(one("id"))
+            platform = one("platform", "twitch")
+            vid = parse_video_id(one("id"), platform)
             if not vid:
-                return self.json_err(400, "Identifiant de VOD invalide")
+                return self.json_err(400, "Identifiant de video invalide")
             try:
-                image = extract_frame(vid, float(one("t", "0") or 0))
+                image = extract_frame(vid, float(one("t", "0") or 0), platform)
             except LookupError as exc:
                 return self.json_err(404, exc)
             except Exception as exc:
@@ -1404,7 +2219,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for key in ("output_dir", "cookies_file", "use_cookies", "quality",
                         "precise_cut", "filename_template", "max_parallel",
                         "favorites", "last_channel", "vertical", "vertical_label",
-                        "layouts"):
+                        "layouts", "platform"):
                 if key in body:
                     CONFIG[key] = body[key]
             save_config(CONFIG)
@@ -1419,12 +2234,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.json_err(400, "Timecodes invalides")
             if end <= start:
                 return self.json_err(400, "La fin doit etre apres le debut")
-            vid = parse_video_id(body.get("video_id") or body.get("url") or "")
+            platform = body.get("platform") or "twitch"
+            if platform not in PLATFORMS:
+                platform = "twitch"
+            vid = parse_video_id(body.get("video_id") or body.get("url") or "", platform)
             if not vid:
-                return self.json_err(400, "VOD invalide")
+                return self.json_err(400, "Video invalide")
             spec = {
                 "video_id": vid,
-                "url": "https://www.twitch.tv/videos/%s" % vid,
+                "platform": platform,
+                "url": video_url(vid, platform),
                 "title": body.get("title") or "",
                 "channel": body.get("channel") or "",
                 "date": body.get("date") or "",
@@ -1534,19 +2353,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 remaining -= len(chunk)
 
 
-RE_VIDEO_ID = re.compile(r"(?:twitch\.tv/videos/)?v?(\d{6,})")
-
-
-def parse_video_id(value):
-    value = (value or "").strip()
-    match = RE_VIDEO_ID.search(value)
-    return match.group(1) if match else ""
-
-
-def parse_channel(value):
+def parse_channel(value, platform="twitch"):
+    """Normalise une saisie de chaine : nom nu, @handle ou URL complete."""
     value = (value or "").strip()
     if not value:
         return ""
+    if platform == "youtube":
+        for marker in ("youtube.com/", "youtu.be/"):
+            if marker in value:
+                value = value.split(marker, 1)[1]
+        value = value.split("?")[0].strip("/")
+        for prefix in ("c/", "user/", "channel/"):
+            if value.startswith(prefix):
+                value = value[len(prefix):]
+        value = value.split("/")[0]
+        return re.sub(r"[^A-Za-z0-9_@.\-]", "", value)
     if "twitch.tv/" in value:
         value = value.split("twitch.tv/", 1)[1]
     value = value.split("?")[0].split("/")[0]
@@ -1556,6 +2377,15 @@ def parse_channel(value):
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        """Le navigateur abandonne ses requetes en cours des qu'on change de
+        timecode : la coupure est normale, pas la peine d'en afficher la trace.
+        """
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return
+        http.server.ThreadingHTTPServer.handle_error(self, request, client_address)
 
 
 def find_port(preferred=8731):
@@ -1569,16 +2399,42 @@ def find_port(preferred=8731):
     return 0
 
 
+def ensure_tools():
+    """Installe yt-dlp et ffmpeg au premier lancement.
+
+    Le depot ne peut pas les embarquer (plus de 100 Mo par fichier chez GitHub) :
+    une installation depuis zero se resume donc a cloner puis lancer.
+    """
+    manquants = [name for name, path in (("yt-dlp.exe", ytdlp_path()),
+                                         ("ffmpeg.exe", ffmpeg_path()),
+                                         ("ffprobe.exe", ffprobe_path()))
+                 if not os.path.isfile(path)]
+    if not manquants:
+        return
+    # Outils places ailleurs par l'utilisateur (reglages ytdlp_path/ffmpeg_dir) :
+    # ce n'est pas a nous d'aller ecrire dans ces dossiers-la.
+    if CONFIG.get("ytdlp_path") or CONFIG.get("ffmpeg_dir"):
+        print("ATTENTION : introuvable -> %s" % ", ".join(manquants))
+        return
+    try:
+        import installer
+        installer.ensure_tools(BASE_DIR)
+    except Exception as exc:
+        print("ATTENTION : installation automatique impossible (%s)" % exc)
+        print("  Manquant dans %s -> %s" % (BASE_DIR, ", ".join(manquants)))
+
+
 def main():
-    missing = [name for name, path in (("yt-dlp.exe", ytdlp_path()), ("ffmpeg.exe", ffmpeg_path()))
-               if not os.path.isfile(path)]
-    if missing:
-        print("ATTENTION : introuvable dans %s -> %s" % (BASE_DIR, ", ".join(missing)))
+    if "--install" in sys.argv:
+        import installer
+        sys.exit(1 if installer.ensure_tools(BASE_DIR, force=True) else 0)
+
+    ensure_tools()
 
     if not HTTPS_OK:
         print("ATTENTION : ce Python n'a pas de support HTTPS (module ssl introuvable).")
         print("  La liste des VOD passera par yt-dlp : plus lente et sans date ni jeu.")
-        print("  Anaconda : lancez l'appli via Twitch Clipper.bat, qui ajoute les DLL requises.")
+        print("  Anaconda : lancez l'appli via Clipper.bat, qui ajoute les DLL requises.")
 
     if is_msix_python():
         print("ATTENTION : Python provient du Microsoft Store (%s)." % sys.executable)
@@ -1604,7 +2460,7 @@ def main():
     url = "http://localhost:%d/?token=%s" % (port, TOKEN)
 
     print("=" * 62)
-    print(" Twitch Clipper")
+    print(" Clipper")
     print(" Interface  : %s" % url)
     print(" Clips      : %s" % CONFIG.get("output_dir"))
     print(" Fermer     : Ctrl+C dans cette fenetre")

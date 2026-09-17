@@ -1,8 +1,12 @@
 # --------------------------------------------------------------------------
 #  Donnees privees : ne doivent JAMAIS partir sur un depot distant.
 # --------------------------------------------------------------------------
+# Motifs volontairement larges : un export de cookies peut s'appeler
+# "www.youtube.com_cookies.txt", "cookies (1).txt", "cookies.json"...
+# Un seul nom oublie suffit a publier un acces a un compte.
+*cookie*
+*Cookie*
 cookies.txt
-cookies*.txt
 *.cookies.tmp
 
 # --------------------------------------------------------------------------
@@ -13,6 +17,11 @@ yt-dlp.exe
 ffmpeg.exe
 ffprobe.exe
 *.exe
+
+# Restes possibles d'une installation interrompue (voir installer.py)
+.dl*
+*.zip
+*.part
 
 # --------------------------------------------------------------------------
 #  Fichiers produits a l'execution

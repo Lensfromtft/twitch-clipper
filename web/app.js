@@ -1,4 +1,4 @@
-/* Twitch Clipper - interface */
+/* Clipper - interface */
 (function () {
   "use strict";
 
@@ -8,6 +8,7 @@
 
   var state = {
     config: {},
+    platform: "twitch",
     kind: "archives",
     channel: null,
     videos: [],
@@ -91,6 +92,16 @@
     return parseFloat(text) || 0;
   }
 
+  function videoUrl(id, platform) {
+    return (platform || state.platform) === "youtube"
+      ? "https://www.youtube.com/watch?v=" + id
+      : "https://www.twitch.tv/videos/" + id;
+  }
+
+  function platformName(platform) {
+    return (platform || state.platform) === "youtube" ? "YouTube" : "Twitch";
+  }
+
   function fmtSize(bytes) {
     if (!bytes) { return ""; }
     var units = ["o", "Ko", "Mo", "Go"], i = 0, value = bytes;
@@ -160,9 +171,6 @@
       settings.title = cfg.ytdlp_update_available
         ? "Réglages — yt-dlp " + cfg.ytdlp_latest + " disponible"
         : "Réglages";
-      if (cfg.last_channel && !$("#channelInput").value) {
-        $("#channelInput").value = cfg.last_channel;
-      }
       return cfg;
     });
   }
@@ -179,11 +187,19 @@
 
   // Chaînes épinglées d'abord, puis les récentes ; une chaîne épinglée reste
   // listée même quand elle sort de l'historique (plafonné à 12).
+  // Les préférences de chaînes sont rangées par plateforme : une chaîne Twitch
+  // n'a rien à faire dans la liste YouTube.
+  function bucket(key) {
+    var value = state.config[key];
+    if (Array.isArray(value)) { value = { twitch: value }; }   // ancien format
+    return ((value || {})[state.platform]) || [];
+  }
+
   function renderRecents() {
-    var pinned = state.config.favorites || [];
+    var pinned = bucket("favorites");
     var seen = {};
     var chips = [];
-    pinned.concat(state.config.recent_channels || []).forEach(function (name) {
+    pinned.concat(bucket("recent_channels")).forEach(function (name) {
       var key = String(name).toLowerCase();
       if (seen[key]) { return; }
       seen[key] = true;
@@ -200,18 +216,21 @@
   }
 
   function isPinned(name) {
-    return (state.config.favorites || []).some(function (f) {
+    return bucket("favorites").some(function (f) {
       return String(f).toLowerCase() === String(name).toLowerCase();
     });
   }
 
   function togglePin(name) {
     var pinned = isPinned(name);
-    var favs = (state.config.favorites || []).filter(function (f) {
+    var kept = bucket("favorites").filter(function (f) {
       return String(f).toLowerCase() !== String(name).toLowerCase();
     });
-    if (!pinned) { favs.unshift(name); }
-    saveConfig({ favorites: favs })
+    if (!pinned) { kept.unshift(name); }
+    var all = Object.assign({}, state.config.favorites || {});
+    if (Array.isArray(state.config.favorites)) { all = { twitch: state.config.favorites }; }
+    all[state.platform] = kept;
+    saveConfig({ favorites: all })
       .then(function () { toast(pinned ? "Chaîne détachée." : "Chaîne épinglée.", "ok"); })
       .catch(function (err) { toast(err.message, "err"); });
   }
@@ -222,6 +241,7 @@
     if (!login) { return; }
     setStatus("Chargement…", "busy");
     var url = "/api/channel?login=" + encodeURIComponent(login) +
+      "&platform=" + state.platform +
       "&type=" + state.kind + "&limit=" + state.limit +
       (append && state.cursor ? "&cursor=" + encodeURIComponent(state.cursor) : "");
     return api(url).then(function (data) {
@@ -285,7 +305,8 @@
       channel: vod.channel || (state.channel ? state.channel.login : ""),
       channel_name: vod.channel_name || (state.channel ? state.channel.display_name : ""),
       date: isoDay(vod),
-      qualities: vod.qualities || null
+      qualities: vod.qualities || null,
+      platform: vod.platform || state.platform
     };
     renderVods();
     renderVodHeader();
@@ -306,7 +327,8 @@
     if (state.vertical) { loadFrame(); }
 
     // Métadonnées complètes (qualités disponibles, durée exacte, date)
-    api("/api/vod?id=" + encodeURIComponent(vod.id)).then(function (info) {
+    api("/api/vod?id=" + encodeURIComponent(vod.id) +
+        "&platform=" + (vod.platform || state.platform)).then(function (info) {
       if (!state.vod || state.vod.id !== info.id) { return; }
       state.vod.duration = info.duration || state.vod.duration;
       state.vod.title = state.vod.title || info.title;
@@ -334,9 +356,14 @@
     if (vod.channel_name || vod.channel) { bits.push(escapeHtml(vod.channel_name || vod.channel)); }
     if (vod.date) { bits.push(escapeHtml(fmtDate(vod.date))); }
     if (vod.duration) { bits.push("durée " + fmtDur(vod.duration)); }
-    bits.push('<a class="muted" target="_blank" rel="noreferrer" href="https://www.twitch.tv/videos/' +
-      escapeHtml(vod.id) + '">twitch.tv/videos/' + escapeHtml(vod.id) + "</a>");
+    bits.push('<a class="muted" target="_blank" rel="noreferrer" href="' +
+      escapeHtml(videoUrl(vod.id, vod.platform)) + '">' +
+      escapeHtml(platformName(vod.platform)) + " · " + escapeHtml(vod.id) + "</a>");
     $("#vodMeta").innerHTML = bits.map(function (b) { return "<span>" + b + "</span>"; }).join("");
+  }
+
+  function isAudioQuality(quality) {
+    return quality === "audio" || quality === "mp3";
   }
 
   function renderQualities(qualities) {
@@ -346,20 +373,89 @@
     (qualities || []).forEach(function (q) {
       options.push('<option value="' + q.height + '">' + escapeHtml(q.label) + "</option>");
     });
-    options.push('<option value="audio">Audio seul</option>');
+    options.push('<option value="audio">Audio seul (m4a)</option>');
+    options.push('<option value="mp3">MP3</option>');
     select.innerHTML = options.join("");
     var wanted = previous || state.config.quality || "best";
     select.value = Array.prototype.some.call(select.options, function (o) { return o.value === wanted; })
       ? wanted : "best";
+    applyAudioMode();
+  }
+
+  // Un extrait sonore n'a pas de composition verticale : on masque l'éditeur et
+  // le sélecteur de format plutôt que de proposer un réglage sans effet.
+  function applyAudioMode() {
+    var audio = isAudioQuality($("#qualitySelect").value);
+    $("#formatToggle").hidden = audio;
+    if (audio) { $("#verticalPanel").hidden = true; }
+    else if (state.vertical) { $("#verticalPanel").hidden = false; }
   }
 
   function playerFallback(message) {
     var ph = $("#playerPlaceholder");
     ph.innerHTML = '<div><div class="ph-icon">&#9888;</div><p>' + escapeHtml(message) + "</p>" +
       "<p class='muted small'>Le découpage reste possible : saisissez les timecodes à la main." +
-      (state.vod ? ' <a class="muted" target="_blank" rel="noreferrer" href="https://www.twitch.tv/videos/' +
-        escapeHtml(state.vod.id) + '">Ouvrir la VOD sur Twitch</a>' : "") + "</p></div>";
+      (state.vod ? ' <a class="muted" target="_blank" rel="noreferrer" href="' +
+        escapeHtml(videoUrl(state.vod.id)) + '">Ouvrir sur ' + platformName() + "</a>" : "") + "</p></div>";
     ph.hidden = false;
+  }
+
+  // L'API YouTube se charge de façon asynchrone et prévient par un rappel
+  // global ; on met en file les montages demandés avant qu'elle soit prête.
+  var ytReady = false, ytQueue = [];
+  window.onYouTubeIframeAPIReady = function () {
+    ytReady = true;
+    ytQueue.splice(0).forEach(function (fn) { fn(); });
+  };
+
+  // Adaptateur : Twitch et YouTube exposent des API différentes, le reste du
+  // code ne manipule que cette interface commune.
+  // L'API YouTube REMPLACE l'élément qu'on lui passe par son iframe, alors que
+  // Twitch injecte dedans. On leur donne donc un enfant jetable : #player reste
+  // un conteneur stable, que l'on peut vider proprement d'une vidéo à l'autre.
+  var PLAYER_HOST = "playerHost";
+
+  function twitchAdapter(videoId, startAt, onReady) {
+    var player = new Twitch.Player(PLAYER_HOST, {
+      video: String(videoId), parent: [location.hostname],
+      width: "100%", height: "100%", autoplay: false, muted: false,
+      time: fmtTwitchTime(startAt || 0)
+    });
+    player.addEventListener(Twitch.Player.READY, function () {
+      if (startAt) { try { player.seek(startAt); } catch (e) { /* ignore */ } }
+      onReady();
+    });
+    return {
+      time: function () { return player.getCurrentTime(); },
+      seek: function (s) { player.seek(s); },
+      play: function () { player.play(); },
+      pause: function () { player.pause(); },
+      isPaused: function () { return player.isPaused(); },
+      destroy: function () { if (player.destroy) { player.destroy(); } }
+    };
+  }
+
+  function youtubeAdapter(videoId, startAt, onReady) {
+    var player = new YT.Player(PLAYER_HOST, {
+      videoId: String(videoId),
+      width: "100%", height: "100%",
+      playerVars: { autoplay: 0, start: Math.floor(startAt || 0), rel: 0,
+                    modestbranding: 1, playsinline: 1 },
+      events: { onReady: function () {
+        if (startAt) { try { player.seekTo(startAt, true); player.pauseVideo(); } catch (e) { /* ignore */ } }
+        onReady();
+      } }
+    });
+    return {
+      time: function () { return player.getCurrentTime(); },
+      seek: function (s) { player.seekTo(s, true); },
+      play: function () { player.playVideo(); },
+      pause: function () { player.pauseVideo(); },
+      // 1 = en lecture ; tout le reste (pause, fin, mise en mémoire tampon)
+      // est traité comme « à l'arrêt » pour la bascule lecture/pause.
+      isPaused: function () { return player.getPlayerState() !== 1; },
+      destroy: function () { if (player.destroy) { player.destroy(); } }
+    };
   }
 
   function mountPlayer(videoId, startAt) {
@@ -369,44 +465,50 @@
     clearTimeout(state.playerTimer);
     stopCutPreview(false);
     // Détruire l'instance précédente : vider l'iframe ne désinscrit pas ses
-    // écouteurs, qui s'accumulaient à chaque changement de VOD.
+    // écouteurs, qui s'accumulaient à chaque changement de vidéo.
     if (state.player && typeof state.player.destroy === "function") {
       try { state.player.destroy(); } catch (e) { /* ignore */ }
     }
     state.player = null;
-    host.innerHTML = "";
+    host.innerHTML = '<div id="' + PLAYER_HOST + '"></div>';
     fitPlayer();
-    if (!window.Twitch || !window.Twitch.Player) {
+
+    var platform = state.platform;
+    var onReady = function () {
+      state.playerReady = true;
+      clearTimeout(state.playerTimer);
+      $("#playerPlaceholder").hidden = true;
+    };
+
+    var build = function () {
+      try {
+        state.player = (platform === "youtube")
+          ? youtubeAdapter(videoId, startAt, onReady)
+          : twitchAdapter(videoId, startAt, onReady);
+        // Si aucune iframe n'a été insérée, on le dit au lieu de laisser un
+        // cadre noir. Si l'iframe est là mais muette (vidéo restreinte...), on
+        // ne la masque pas : le message de la plateforme est plus précis.
+        state.playerTimer = setTimeout(function () {
+          if (!state.playerReady && !host.querySelector("iframe")) {
+            playerFallback("Le lecteur n'a pas pu être chargé.");
+          }
+        }, 10000);
+      } catch (err) {
+        playerFallback("Lecteur en erreur : " + err.message);
+      }
+    };
+
+    if (platform === "youtube") {
+      if (!window.YT || !YT.Player) {
+        if (!ytReady) { ytQueue.push(build); return; }
+        playerFallback("Lecteur YouTube indisponible (script non chargé).");
+        return;
+      }
+    } else if (!window.Twitch || !window.Twitch.Player) {
       playerFallback("Lecteur Twitch indisponible (script non chargé).");
       return;
     }
-    try {
-      state.player = new Twitch.Player("player", {
-        video: String(videoId),
-        parent: [location.hostname],
-        width: "100%",
-        height: "100%",
-        autoplay: false,
-        muted: false,
-        time: fmtTwitchTime(startAt || 0)
-      });
-      state.player.addEventListener(Twitch.Player.READY, function () {
-        state.playerReady = true;
-        clearTimeout(state.playerTimer);
-        $("#playerPlaceholder").hidden = true;
-        if (startAt) { try { state.player.seek(startAt); } catch (e) { /* ignore */ } }
-      });
-      // Si aucune iframe n'a été insérée, on le dit au lieu de laisser un cadre
-      // noir. Si l'iframe est là mais muette (VOD abonnés...), on ne la masque
-      // pas : le message d'erreur de Twitch lui-même est plus précis.
-      state.playerTimer = setTimeout(function () {
-        if (!state.playerReady && !host.querySelector("iframe")) {
-          playerFallback("Le lecteur Twitch n'a pas pu être chargé.");
-        }
-      }, 10000);
-    } catch (err) {
-      playerFallback("Lecteur Twitch en erreur : " + err.message);
-    }
+    build();
   }
 
   // Inscrit le lecteur en 16:9 au plus grand dans le cadre disponible : selon la
@@ -436,7 +538,7 @@
   function playerTime() {
     if (!state.player || !state.playerReady) { return null; }
     try {
-      var t = state.player.getCurrentTime();
+      var t = state.player.time();
       return (typeof t === "number" && isFinite(t)) ? t : null;
     } catch (e) { return null; }
   }
@@ -566,16 +668,18 @@
     var vod = state.vod;
     if (!vod) { $("#cmdPreview").textContent = "—"; return; }
     var quality = $("#qualitySelect").value;
-    var format = quality === "audio" ? "ba/b"
+    var audio = isAudioQuality(quality);
+    var format = audio ? "ba/b"
       : (quality === "best" ? "bv*+ba/b" : "bv*[height<=" + quality + "]+ba/b[height<=" + quality + "]");
     var parts = ["yt-dlp"];
     if (state.config.use_cookies && state.config.cookies_present) { parts.push("--cookies cookies.txt"); }
     parts.push('--download-sections "*' + fmtTC(state.start, true) + "-" + fmtTC(state.end, true) + '"');
-    if ($("#preciseCheck").checked) { parts.push("--force-keyframes-at-cuts"); }
+    if ($("#preciseCheck").checked || audio) { parts.push("--force-keyframes-at-cuts"); }
     parts.push('-f "' + format + '"');
-    parts.push('"https://www.twitch.tv/videos/' + vod.id + '"');
+    if (quality === "mp3") { parts.push("-x --audio-format mp3 --audio-quality 0"); }
+    parts.push('"' + videoUrl(vod.id, vod.platform) + '"');
     var text = parts.join(" ");
-    if (state.vertical) {
+    if (state.vertical && !audio) {
       // Le mode vertical ajoute une seconde passe : on montre les deux.
       var camH = Math.round(OUT_H * state.layout.split / 2) * 2;
       var c = state.layout.cam, g = state.layout.game;
@@ -610,7 +714,11 @@
       return [Math.round(box[0] * sx), Math.round(box[1] * sy),
               Math.round(box[2] * sx), Math.round(box[3] * sy)];
     };
-    return { cam: scaled(REF_CAM), game: scaled(REF_GAME), split: defaultSplit() };
+    // On mémorise la définition de l'image de repérage : le clip téléchargé
+    // peut avoir une autre définition, le serveur remet alors les cadres à
+    // l'échelle au lieu de les appliquer tels quels.
+    return { cam: scaled(REF_CAM), game: scaled(REF_GAME), split: defaultSplit(),
+             frame: [fw || REF_W, fh || REF_H] };
   }
 
   function clampBox(box) {
@@ -633,8 +741,17 @@
     var saved = (state.config.layouts || {})[channelKey()];
     var base = defaultLayout(state.frame.w || 1920, state.frame.h || 1080);
     if (saved && saved.cam && saved.game) {
-      state.layout = { cam: clampBox(saved.cam), game: clampBox(saved.game),
-                       split: Number(saved.split) || base.split };
+      // Un réglage enregistré peut venir d'une image d'une autre définition :
+      // on le ramène à celle de l'image courante avant de l'afficher.
+      var ref = saved.frame || [REF_W, REF_H];
+      var sx = (state.frame.w || REF_W) / (ref[0] || REF_W);
+      var sy = (state.frame.h || REF_H) / (ref[1] || REF_H);
+      var fit = function (b) {
+        return clampBox([b[0] * sx, b[1] * sy, b[2] * sx, b[3] * sy]);
+      };
+      state.layout = { cam: fit(saved.cam), game: fit(saved.game),
+                       split: Number(saved.split) || base.split,
+                       frame: [state.frame.w || REF_W, state.frame.h || REF_H] };
     } else {
       state.layout = base;
     }
@@ -693,7 +810,13 @@
     coverInto($("#vprevGame"), state.layout.game, box.width, gameH);
     var label = $("#vprevLabel");
     $("#vprevName").textContent = labelText();
-    $("#vprevLogo").hidden = !state.config.logo_present;
+    // Un logo par plateforme : celui de Twitch n'a rien à faire sur un extrait
+    // YouTube. Sans fichier correspondant, seul le nom est incrusté.
+    var logos = state.config.logo_present;
+    var hasLogo = (logos && typeof logos === "object") ? !!logos[state.platform] : !!logos;
+    var logoImg = $("#vprevLogo");
+    logoImg.hidden = !hasLogo;
+    if (hasLogo) { logoImg.src = "/logo.png?platform=" + state.platform; }
     label.hidden = !($("#labelCheck").checked && labelText());
   }
 
@@ -730,14 +853,25 @@
     });
   }
 
+  var frameAbort = null;
+
   function loadFrame() {
     if (!state.vod) { return; }
     var state_el = $("#vframeState");
     state_el.hidden = false;
     state_el.textContent = "Extraction de l'image…";
+    // Une extraction demande quelques secondes ; sans annuler la précédente,
+    // changer de timecode empile les requêtes et c'est la plus lente qui gagne.
+    if (frameAbort) { frameAbort.abort(); }
+    var ctrl = (typeof AbortController === "function") ? new AbortController() : null;
+    frameAbort = ctrl;
     var url = "/api/frame?id=" + encodeURIComponent(state.vod.id) +
+      "&platform=" + state.platform +
       "&t=" + encodeURIComponent(state.start.toFixed(2));
-    fetch(url, { headers: { "X-Clip-Token": TOKEN } }).then(function (resp) {
+    fetch(url, {
+      headers: { "X-Clip-Token": TOKEN },
+      signal: ctrl ? ctrl.signal : undefined
+    }).then(function (resp) {
       if (!resp.ok) {
         return resp.json().catch(function () { return {}; }).then(function (d) {
           throw new Error(d.error || ("Erreur " + resp.status));
@@ -761,9 +895,61 @@
       };
       img.src = objectUrl;
     }).catch(function (err) {
+      if (err && err.name === "AbortError") { return; }   // remplacée, pas échouée
       state_el.hidden = false;
-      state_el.textContent = "Image indisponible : " + err.message;
+      state_el.textContent = "Image indisponible : " +
+        (err.message === "Failed to fetch" ? "le serveur n'a pas répondu" : err.message);
+    }).then(function () {
+      if (frameAbort === ctrl) { frameAbort = null; }
     });
+  }
+
+  function setPlatform(platform, persist) {
+    state.platform = (platform === "youtube") ? "youtube" : "twitch";
+    // Bascule la couleur d'accent de toute l'interface (violet / rouge).
+    document.body.setAttribute("data-platform", state.platform);
+    $$("#platformTabs .tab").forEach(function (tab) {
+      tab.classList.toggle("is-active", tab.getAttribute("data-platform") === state.platform);
+    });
+    $$("#kindTabs .tab").forEach(function (tab) {
+      tab.textContent = tab.getAttribute("data-" + state.platform) || tab.textContent;
+    });
+    $("#channelLabel").textContent = "Chaîne " + platformName();
+    $("#channelInput").placeholder = state.platform === "youtube"
+      ? "ex : @Squeezie ou youtube.com/@Squeezie" : "ex : ponce ou twitch.tv/ponce";
+    $("#directInput").placeholder = state.platform === "youtube"
+      ? "youtube.com/watch?v=… ou youtu.be/…" : "twitch.tv/videos/123456789?t=2h09m50s";
+
+    state.channel = null;
+    state.videos = [];
+    state.cursor = null;
+    $("#channelHead").hidden = true;
+    $("#moreWrap").hidden = true;
+    $("#vodList").innerHTML = '<div class="empty"><p>Entrez une chaîne ' +
+      platformName() + " pour lister ses vidéos.</p></div>";
+
+    // Textes qui nommaient Twitch en dur
+    if (!state.vod) {
+      $("#vodTitle").textContent = "Aucune vidéo sélectionnée";
+      $("#vodMeta").textContent =
+        "Choisissez une vidéo à gauche pour la prévisualiser et la découper.";
+    }
+    var ph = $("#playerPlaceholder");
+    if (!ph.hidden && !state.vod) {
+      ph.innerHTML = '<div><div class="ph-icon">&#9654;</div>' +
+        "<p>La prévisualisation apparaîtra ici</p>" +
+        '<p class="muted small">Lecteur ' + platformName() +
+        " officiel : navigation dans toute la vidéo.</p></div>";
+    }
+    renderRecents();
+
+    var last = state.config.last_channel;
+    if (last && !Array.isArray(last) && typeof last === "object") { last = last[state.platform]; }
+    else if (state.platform === "youtube") { last = ""; }
+    $("#channelInput").value = last || "";
+
+    if (persist) { saveConfig({ platform: state.platform }).catch(function () {}); }
+    updateCommand();
   }
 
   function setFormat(vertical, persist) {
@@ -793,6 +979,7 @@
       method: "POST",
       body: {
         video_id: vod.id,
+        platform: vod.platform || state.platform,
         title: vod.title,
         channel: vod.channel || (state.channel ? state.channel.login : ""),
         date: vod.date,
@@ -806,6 +993,15 @@
       }
     }).then(function () {
       toast("Clip ajouté à la file (" + fmtDur(state.end - state.start) + ").", "ok");
+      // Sur YouTube, atteindre un point tardif d'une longue vidéo oblige ffmpeg
+      // à lire le flux depuis le début : on prévient plutôt que de laisser
+      // croire à un blocage.
+      if (state.platform === "youtube" && state.start > 1800) {
+        setTimeout(function () {
+          toast("Coupe à " + fmtTC(state.start) + " dans une longue vidéo YouTube : "
+                + "le téléchargement peut prendre plusieurs minutes.", "err");
+        }, 1200);
+      }
       pollJobs();
     }).catch(function (err) { toast(err.message, "err"); });
   }
@@ -819,7 +1015,36 @@
       setStatus(active ? "Téléchargement…" : "Prêt", active ? "busy" : "");
       state.pollTimer = setTimeout(pollJobs, active ? 700 : 4000);
     }).catch(function () {
+      // Le serveur local est arrêté ou redémarre : le dire, sinon l'interface
+      // a l'air simplement figée et les erreurs ne sortent que dans la console.
+      setStatus("Serveur injoignable", "err");
       state.pollTimer = setTimeout(pollJobs, 5000);
+    });
+  }
+
+  // Les cartes sont reconstruites toutes les 700 ms pendant un téléchargement.
+  // Sans mémoriser les journaux dépliés et leur défilement, le bloc « Détails »
+  // se refermerait à chaque rafraîchissement, juste quand on en a besoin.
+  var openLogs = Object.create(null);
+  var logScroll = Object.create(null);
+
+  function saveLogs(list) {
+    Array.prototype.forEach.call(list.querySelectorAll("details.job-log"), function (d) {
+      var id = d.getAttribute("data-job");
+      var pre = d.querySelector("pre");
+      if (!id || !pre) { return; }
+      // « Colle au bas » : tant que l'utilisateur n'a pas remonté le journal,
+      // on garde la dernière ligne visible malgré les ajouts.
+      var bas = pre.scrollHeight - pre.clientHeight - pre.scrollTop < 8;
+      logScroll[id] = bas ? -1 : pre.scrollTop;
+    });
+  }
+
+  function restoreLogs(list) {
+    Array.prototype.forEach.call(list.querySelectorAll("details.job-log[open] pre"), function (pre) {
+      var id = pre.parentNode.getAttribute("data-job");
+      var pos = logScroll[id];
+      pre.scrollTop = (pos === undefined || pos === -1) ? pre.scrollHeight : pos;
     });
   }
 
@@ -829,11 +1054,16 @@
       list.innerHTML = '<div class="empty small"><p>Aucun clip pour l\'instant.</p></div>';
       return;
     }
+    saveLogs(list);
     list.innerHTML = state.jobs.slice().reverse().map(function (job) {
       var cls = job.state === "done" ? "done" : (job.state === "error" ? "error" : "");
       var meta = [];
       if (job.state === "running") {
         meta.push(job.phase + (job.speed ? " · " + job.speed : ""));
+        // Temps écoulé : sur une coupe profonde dans une longue vidéo YouTube,
+        // la progression peut rester à 0 % plusieurs minutes. Sans ce compteur,
+        // rien ne distingue « lent » de « figé ».
+        meta.push(fmtDur(job.elapsed) + " écoulées");
         if (job.eta) { meta.push("reste " + job.eta); }
       } else if (job.state === "done") {
         meta.push(fmtSize(job.size));
@@ -862,13 +1092,17 @@
           (job.state === "running" ? Math.round(job.progress) + " %" : "") + "</span></div>" +
         '<div class="bar"><span style="width:' + (job.state === "done" ? 100 : job.progress) + '%"></span></div>' +
         (job.error ? '<div class="job-err">' + escapeHtml(job.error) + "</div>" : "") +
-        (job.error && job.log && job.log.length
-          ? '<details class="job-log"><summary>Détails</summary><pre>' +
+        // Journal visible aussi pendant le téléchargement : sans cela, un clip
+        // qui reste bloqué ne donne aucune prise pour comprendre pourquoi.
+        ((job.log && job.log.length && (job.error || job.state === "running"))
+          ? '<details class="job-log" data-job="' + escapeHtml(job.id) + '"' +
+            (openLogs[job.id] ? " open" : "") + "><summary>Détails</summary><pre>" +
             escapeHtml(job.log.join("\n")) + "</pre></details>"
           : "") +
         actions +
         "</div>";
     }).join("");
+    restoreLogs(list);
   }
 
   /* --------------------------------------------------------- modales --- */
@@ -951,20 +1185,34 @@
   $("#directForm").addEventListener("submit", function (e) {
     e.preventDefault();
     var raw = $("#directInput").value.trim();
-    var idMatch = raw.match(/(\d{6,})/);
-    if (!idMatch) { toast("Lien ou identifiant de VOD invalide.", "err"); return; }
+    // Un lien suffit à déterminer la plateforme : on bascule sans rien demander.
+    var platform = /youtube\.com|youtu\.be/i.test(raw) ? "youtube"
+      : (/twitch\.tv/i.test(raw) ? "twitch" : state.platform);
+    if (platform !== state.platform) { setPlatform(platform, true); }
+
+    var id = "";
+    if (platform === "youtube") {
+      var m = raw.match(/(?:youtu\.be\/|[?&]v=|\/shorts\/|\/live\/|\/embed\/)([A-Za-z0-9_-]{11})/)
+        || raw.match(/^([A-Za-z0-9_-]{11})$/);
+      id = m ? m[1] : "";
+    } else {
+      var d = raw.match(/(\d{6,})/);
+      id = d ? d[1] : "";
+    }
+    if (!id) { toast("Lien ou identifiant de vidéo invalide.", "err"); return; }
+
     var at = 0;
-    var timeMatch = raw.match(/[?&]t=([0-9hms]+)/i);
+    var timeMatch = raw.match(/[?&](?:t|start)=([0-9hms]+)/i);
     if (timeMatch) { at = parseTC(timeMatch[1]); }
     setStatus("Chargement…", "busy");
-    api("/api/vod?id=" + idMatch[1]).then(function (info) {
+    api("/api/vod?id=" + encodeURIComponent(id) + "&platform=" + platform).then(function (info) {
       selectVod(info, at);
       setStatus("Prêt");
       if (at) { toast("Début placé à " + fmtTC(at) + " (depuis le lien).", "ok"); }
     }).catch(function (err) {
       setStatus("Erreur", "err");
       toast(err.message, "err");
-      selectVod({ id: idMatch[1], title: "VOD " + idMatch[1], duration: 0 }, at);
+      selectVod({ id: id, title: "Vidéo " + id, duration: 0, platform: platform }, at);
     });
   });
 
@@ -1024,6 +1272,7 @@
   });
 
   $("#qualitySelect").addEventListener("change", function () {
+    applyAudioMode();
     updateCommand();
     saveConfig({ quality: $("#qualitySelect").value }).catch(function () {});
   });
@@ -1035,6 +1284,11 @@
 
   $("#btnDownload").addEventListener("click", submitJob);
   $("#btnPreviewCut").addEventListener("click", startCutPreview);
+
+  $("#platformTabs").addEventListener("click", function (e) {
+    var tab = e.target.closest("[data-platform]");
+    if (tab) { setPlatform(tab.getAttribute("data-platform"), true); }
+  });
 
   $("#formatToggle").addEventListener("click", function (e) {
     var tab = e.target.closest("[data-format]");
@@ -1103,6 +1357,15 @@
       toast("Commande copiée.", "ok");
     }).catch(function () { toast("Copie impossible.", "err"); });
   });
+
+  // « toggle » ne remonte pas : on écoute en phase de capture.
+  $("#jobList").addEventListener("toggle", function (e) {
+    var d = e.target;
+    if (!d || d.tagName !== "DETAILS") { return; }
+    var id = d.getAttribute("data-job");
+    if (!id) { return; }
+    if (d.open) { openLogs[id] = true; } else { delete openLogs[id]; delete logScroll[id]; }
+  }, true);
 
   $("#jobList").addEventListener("click", function (e) {
     var btn = e.target.closest("button");
@@ -1201,8 +1464,10 @@
   /* --------------------------------------------------------- démarrage --- */
 
   loadConfig().then(function (cfg) {
+    setPlatform(cfg.platform || "twitch", false);
     setFormat(!!cfg.vertical, false);
-    if (cfg.last_channel) { loadChannel(cfg.last_channel, false); }
+    var last = $("#channelInput").value;
+    if (last) { loadChannel(last, false); }
   });
   pollJobs();
   setRange(0, 15, true);

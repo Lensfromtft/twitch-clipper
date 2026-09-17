@@ -1,5 +1,5 @@
 @echo off
-title Twitch Clipper
+title Clipper
 cd /d "%~dp0"
 setlocal enabledelayedexpansion
 
@@ -20,11 +20,14 @@ where py >nul 2>nul && (
     set "PYARGS=-3"
 )
 
-rem 2) un python du PATH qui ne soit pas l'alias du Store
+rem 2) un python du PATH qui ne soit pas l'alias du Store.
+rem    Le filtre se fait par substitution de chaine plutot qu'avec "find" :
+rem    selon le PATH, c'est le find de Git Bash ou de MSYS qui repondait, avec
+rem    une autre syntaxe, et l'alias du Store passait quand meme.
 if not defined PYEXE (
     for /f "delims=" %%P in ('where python 2^>nul') do (
-        echo %%P | find /i "WindowsApps" >nul
-        if errorlevel 1 if not defined PYEXE set "PYEXE=%%P"
+        set "CANDIDAT=%%P"
+        if "!CANDIDAT:WindowsApps=!"=="!CANDIDAT!" if not defined PYEXE set "PYEXE=%%P"
     )
 )
 
@@ -50,12 +53,31 @@ if not defined PYEXE (
     where python >nul 2>nul && set "PYEXE=python"
 )
 
+rem --------------------------------------------------------------------------
+rem  Toujours rien : Python n'est pas installe. winget est fourni avec
+rem  Windows 11 et Windows 10 (2004+) ; on propose l'installation plutot que de
+rem  renvoyer vers un telechargement manuel.
+rem --------------------------------------------------------------------------
 if not defined PYEXE (
     echo Python est introuvable sur cette machine.
-    echo Installez Python 3 depuis https://www.python.org/downloads/ puis relancez.
+    echo.
+    where winget >nul 2>nul
+    if errorlevel 1 (
+        echo Installez Python 3 depuis https://www.python.org/downloads/ puis
+        echo relancez ce fichier. Cochez "Add python.exe to PATH" au passage.
+        echo.
+        pause >nul
+        exit /b 1
+    )
+    echo Installation automatique par winget ^(gestionnaire de paquets Windows^).
+    echo Appuyez sur une touche pour lancer, ou fermez la fenetre pour annuler.
+    pause >nul
+    winget install --exact --id Python.Python.3.12 --source winget --accept-package-agreements --accept-source-agreements
+    echo.
+    echo Termine. Relancez Clipper.bat : le PATH doit etre recharge.
     echo.
     pause >nul
-    exit /b 1
+    exit /b 0
 )
 
 rem --------------------------------------------------------------------------
