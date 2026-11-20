@@ -24,10 +24,15 @@ une seule fois) et ouvre l'interface.
 
 | Dépendance | Comment elle arrive |
 |---|---|
-| **Python 3.8+** | `Clipper.bat` le cherche, et propose `winget install Python.Python.3.12` s'il est absent |
-| **yt-dlp.exe** | téléchargé depuis les [releases officielles](https://github.com/yt-dlp/yt-dlp/releases/latest) |
-| **ffmpeg.exe**, **ffprobe.exe** | extraits de l'[archive maintenue par yt-dlp](https://github.com/yt-dlp/FFmpeg-Builds/releases/latest) |
+| **Python 3.8+** | `Clipper.bat` utilise celui de la machine ; à défaut, il télécharge la version portable officielle (python.org, ~10 Mo) dans `%LOCALAPPDATA%\Clipper\python` — sans droits administrateur ni installeur |
+| **yt-dlp.exe** | téléchargé depuis les [releases officielles](https://github.com/yt-dlp/yt-dlp/releases/latest), empreinte SHA-256 vérifiée |
+| **ffmpeg.exe**, **ffprobe.exe** | extraits de l'[archive maintenue par yt-dlp](https://github.com/yt-dlp/FFmpeg-Builds/releases/latest), empreinte SHA-256 vérifiée |
 | Modules Python | **aucun** — uniquement la bibliothèque standard |
+
+Sur un PC neuf, il n'y a donc **rien à installer à la main** : seule une
+connexion internet est nécessaire au premier lancement. Un exécutable dont
+l'empreinte ne correspond pas à celle publiée par le projet est refusé.
+Pour retirer le Python portable, supprimez simplement son dossier.
 
 Ces exécutables ne peuvent pas être versionnés : ffmpeg et ffprobe pèsent plus de
 160 Mo chacun, au-delà de la limite de 100 Mo par fichier de GitHub. Les
@@ -387,5 +392,6 @@ dossiers*.
 - La liste des VOD passe par l'API publique de Twitch (rapide, avec dates et jeux)
   et retombe automatiquement sur `yt-dlp --flat-playlist` si celle-ci change.
 - Les appels API sont protégés par un jeton de session et refusent toute requête
-  dont l'en-tête `Host` n'est pas local ; les fichiers ne sont servis que depuis le
-  dossier de sortie.
+  dont l'en-tête `Host` n'est pas local ; les fichiers ne sont servis, ouverts ou
+  montrés que depuis le dossier de sortie, et `Ouvrir` ne lance que des fichiers
+  audio/vidéo (jamais un exécutable).

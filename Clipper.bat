@@ -48,36 +48,42 @@ if not defined PYEXE (
     ) do if not defined PYEXE if exist %%D set "PYEXE=%%~fD"
 )
 
-rem 4) en dernier recours, l'alias du Store (l'appli s'adapte et previent)
-if not defined PYEXE (
-    where python >nul 2>nul && set "PYEXE=python"
-)
+rem 4) Python portable deja installe par ce lanceur lors d'un lancement precedent
+set "PYHOME=%LOCALAPPDATA%\Clipper\python"
+if not defined PYEXE if exist "%PYHOME%\python.exe" set "PYEXE=%PYHOME%\python.exe"
 
 rem --------------------------------------------------------------------------
-rem  Toujours rien : Python n'est pas installe. winget est fourni avec
-rem  Windows 11 et Windows 10 (2004+) ; on propose l'installation plutot que de
-rem  renvoyer vers un telechargement manuel.
+rem  Toujours rien : poste vierge. On telecharge la distribution "embarquable"
+rem  officielle de Python (python.org, ~10 Mo) dans %LOCALAPPDATA%\Clipper\python.
+rem  Ni droits administrateur, ni installeur, ni modification du PATH : il
+rem  suffit de supprimer ce dossier pour la retirer. Elle contient tout ce dont
+rem  Clipper a besoin (bibliotheque standard + HTTPS).
+rem
+rem  Remarque : sur un Windows neuf, "where python" trouve un faux python.exe
+rem  (alias qui ouvre le Microsoft Store sans rien executer). On ne s'y fie donc
+rem  qu'en tout dernier recours, et seulement s'il execute vraiment du Python.
+rem  Les lignes ci-dessous sont volontairement hors de tout bloc ( ) : cmd lit
+rem  un bloc en une fois et y fige les variables.
 rem --------------------------------------------------------------------------
+set "PYVER=3.12.10"
+set "PYZIP=python-%PYVER%-embed-amd64.zip"
+if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "PYZIP=python-%PYVER%-embed-arm64.zip"
+if not defined PYEXE echo Python est introuvable : installation d'une copie portable ^(une seule fois, ~10 Mo^)...
+if not defined PYEXE powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $zip=Join-Path $env:TEMP 'clipper-python.zip'; Invoke-WebRequest -UseBasicParsing -Uri ('https://www.python.org/ftp/python/' + $env:PYVER + '/' + $env:PYZIP) -OutFile $zip; if (Test-Path $env:PYHOME) { Remove-Item -Recurse -Force $env:PYHOME }; Expand-Archive -Force $zip $env:PYHOME; Remove-Item $zip"
+if not defined PYEXE if exist "%PYHOME%\python.exe" set "PYEXE=%PYHOME%\python.exe"
+
+rem 5) en dernier recours, le Python du Store s'il est reellement installe
+rem    (l'appli s'adapte et previent).
+if not defined PYEXE python -c "import sys" >nul 2>nul && set "PYEXE=python"
+
 if not defined PYEXE (
-    echo Python est introuvable sur cette machine.
     echo.
-    where winget >nul 2>nul
-    if errorlevel 1 (
-        echo Installez Python 3 depuis https://www.python.org/downloads/ puis
-        echo relancez ce fichier. Cochez "Add python.exe to PATH" au passage.
-        echo.
-        pause >nul
-        exit /b 1
-    )
-    echo Installation automatique par winget ^(gestionnaire de paquets Windows^).
-    echo Appuyez sur une touche pour lancer, ou fermez la fenetre pour annuler.
-    pause >nul
-    winget install --exact --id Python.Python.3.12 --source winget --accept-package-agreements --accept-source-agreements
-    echo.
-    echo Termine. Relancez Clipper.bat : le PATH doit etre recharge.
+    echo Impossible d'installer Python automatiquement ^(pas d'acces a python.org ?^).
+    echo Installez Python 3 depuis https://www.python.org/downloads/ puis
+    echo relancez ce fichier. Cochez "Add python.exe to PATH" au passage.
     echo.
     pause >nul
-    exit /b 0
+    exit /b 1
 )
 
 rem --------------------------------------------------------------------------
