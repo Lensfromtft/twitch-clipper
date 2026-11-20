@@ -11,6 +11,7 @@ Utilisable seul :
     python installer.py --force      reinstalle tout
 """
 
+import hashlib
 import os
 import shutil
 import ssl
@@ -23,12 +24,17 @@ import zipfile
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # yt-dlp publie un .exe autonome ; l'URL "latest" suit les nouvelles versions.
-YTDLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+YTDLP_REPO = "yt-dlp/yt-dlp"
+YTDLP_ASSET = "yt-dlp.exe"
+YTDLP_SUMS = "SHA2-256SUMS"
+YTDLP_URL = "https://github.com/%s/releases/latest/download/%s" % (YTDLP_REPO, YTDLP_ASSET)
 
 # Build ffmpeg maintenu par l'equipe yt-dlp : c'est celui qu'elle recommande, et
 # il corrige des defauts de decoupe presents dans les builds generiques.
-FFMPEG_URL = ("https://github.com/yt-dlp/FFmpeg-Builds/releases/latest/download/"
-              "ffmpeg-master-latest-win64-gpl.zip")
+FFMPEG_REPO = "yt-dlp/FFmpeg-Builds"
+FFMPEG_ASSET = "ffmpeg-master-latest-win64-gpl.zip"
+FFMPEG_SUMS = "checksums.sha256"
+FFMPEG_URL = "https://github.com/%s/releases/latest/download/%s" % (FFMPEG_REPO, FFMPEG_ASSET)
 
 TOOLS = ("yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe")
 
@@ -73,7 +79,34 @@ def show_progress(label, done, total):
     sys.stdout.flush()
 
 
-def download(url, target, label):
+def release_sha256(repo, sums_name, asset):
+    """Somme SHA-256 publiee par le projet, et URL de l'asset dans la MEME release.
+
+    "releases/latest/download/<fichier>" redirige vers
+    "releases/download/<tag>/<fichier>". On lit le tag sur cette redirection
+    et on telecharge ensuite l'asset depuis ce tag precis : FFmpeg-Builds
+    publie plusieurs fois par jour, et deux appels a "latest" pourraient sinon
+    tomber sur deux builds differents (somme et fichier incoherents).
+    """
+    requete = urllib.request.Request(
+        "https://github.com/%s/releases/latest/download/%s" % (repo, sums_name),
+        headers={"User-Agent": "Clipper"})
+    with urllib.request.urlopen(requete, timeout=30) as reponse:
+        finale = reponse.geturl()
+        texte = reponse.read().decode("utf-8", "replace")
+    url = "https://github.com/%s/releases/latest/download/%s" % (repo, asset)
+    marqueur = "/releases/download/"
+    if ("github.com/%s%s" % (repo, marqueur)) in finale:
+        tag = finale.split(marqueur, 1)[1].split("/")[0]
+        url = "https://github.com/%s/releases/download/%s/%s" % (repo, tag, asset)
+    for ligne in texte.splitlines():
+        morceaux = ligne.strip().split()
+        if len(morceaux) == 2 and morceaux[1].lstrip("*") == asset:
+            return morceaux[0].lower(), url
+    raise IOError("somme de controle absente pour %s" % asset)
+
+
+def download(url, target, label, sha256=None):
     """Telecharge vers un fichier temporaire, puis met en place d'un bloc.
 
     Passer par un temporaire evite de laisser un .exe a moitie ecrit si la
@@ -88,17 +121,23 @@ def download(url, target, label):
         with urllib.request.urlopen(requete, timeout=60) as reponse:
             total = int(reponse.headers.get("Content-Length") or 0)
             recu = 0
+            empreinte = hashlib.sha256()
             with open(partiel, "wb") as sortie:
                 while True:
                     bloc = reponse.read(262144)
                     if not bloc:
                         break
                     sortie.write(bloc)
+                    empreinte.update(bloc)
                     recu += len(bloc)
                     show_progress(label, recu, total)
         sys.stdout.write("\n")
         if total and recu < total:
             raise IOError("telechargement incomplet (%d / %d octets)" % (recu, total))
+        # Un executable qu'on va lancer doit etre exactement celui publie par
+        # le projet : on refuse tout fichier dont l'empreinte differe.
+        if sha256 and empreinte.hexdigest().lower() != sha256:
+            raise IOError("somme de controle SHA-256 invalide, fichier rejete")
         os.replace(partiel, target)
     finally:
         if os.path.exists(partiel):
@@ -109,7 +148,8 @@ def download(url, target, label):
 
 
 def install_ytdlp(folder):
-    download(YTDLP_URL, os.path.join(folder, "yt-dlp.exe"), "yt-dlp")
+    somme, url = release_sha256(YTDLP_REPO, YTDLP_SUMS, YTDLP_ASSET)
+    download(url, os.path.join(folder, "yt-dlp.exe"), "yt-dlp", somme)
 
 
 def install_ffmpeg(folder, besoins=("ffmpeg.exe", "ffprobe.exe")):
@@ -122,7 +162,8 @@ def install_ffmpeg(folder, besoins=("ffmpeg.exe", "ffprobe.exe")):
     fd, archive = tempfile.mkstemp(prefix="ffmpeg", suffix=".zip", dir=folder)
     os.close(fd)
     try:
-        download(FFMPEG_URL, archive, "ffmpeg")
+        somme, url = release_sha256(FFMPEG_REPO, FFMPEG_SUMS, FFMPEG_ASSET)
+        download(url, archive, "ffmpeg", somme)
         with zipfile.ZipFile(archive) as zf:
             voulus = {}
             for membre in zf.namelist():

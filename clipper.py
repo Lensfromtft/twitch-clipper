@@ -31,6 +31,11 @@ import webbrowser
 from collections import OrderedDict
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Le Python "embarquable" que Clipper.bat installe sur un poste vierge ignore le
+# dossier du script (fichier ._pth) : sans cette ligne, "import installer"
+# echouerait.
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 WEB_DIR = os.path.join(BASE_DIR, "web")
 YTDLP = os.path.join(BASE_DIR, "yt-dlp.exe")
 
@@ -2044,9 +2049,16 @@ def open_in_explorer(target, select=False):
     subprocess.Popen(command)
 
 
+# Seuls les clips produits peuvent etre lances depuis l'interface : jamais un
+# executable, un script ou un raccourci, meme s'il se trouve dans le dossier de
+# sortie (celui-ci est modifiable dans les reglages).
+OPENABLE_EXTS = (".mp4", ".mkv", ".m4a", ".webm", ".mp3", ".opus")
+
+
 def inside_output_dir(path):
-    """Un fichier n'est servi/ouvert que s'il vient du dossier de sortie courant
-    ou s'il a ete produit par un job de cette session (dossier change entre-temps)."""
+    """Un fichier ou dossier n'est servi/ouvert que s'il vient du dossier de
+    sortie courant ou s'il a ete produit par un job de cette session (dossier
+    change entre-temps)."""
     try:
         target = os.path.realpath(path)
     except Exception:
@@ -2059,7 +2071,9 @@ def inside_output_dir(path):
         pass  # volumes differents : on retombe sur la liste des clips produits
     for job in JOBS.list():
         try:
-            if job.get("path") and os.path.realpath(job["path"]) == target:
+            produit = job.get("path")
+            if produit and target in (os.path.realpath(produit),
+                                      os.path.realpath(os.path.dirname(produit))):
                 return True
         except Exception:
             continue
@@ -2275,8 +2289,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             target = body.get("path") or CONFIG.get("output_dir")
             if not target or not os.path.exists(target):
                 return self.json_err(404, "Fichier introuvable")
-            if os.path.isfile(target) and not inside_output_dir(target):
+            if not inside_output_dir(target):
                 return self.json_err(403, "Chemin hors du dossier de sortie")
+            if (path == "/api/open" and os.path.isfile(target)
+                    and not target.lower().endswith(OPENABLE_EXTS)):
+                return self.json_err(403, "Type de fichier non autorise")
             try:
                 open_in_explorer(target, select=(path == "/api/reveal" and os.path.isfile(target)))
             except Exception as exc:
@@ -2302,8 +2319,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def serve_static(self, rel):
         rel = urllib.parse.unquote(rel)
+        root = os.path.realpath(WEB_DIR)
         target = os.path.realpath(os.path.join(WEB_DIR, rel))
-        if not target.startswith(os.path.realpath(WEB_DIR)) or not os.path.isfile(target):
+        try:
+            dedans = os.path.commonpath([root, target]) == root
+        except ValueError:  # autre lecteur
+            dedans = False
+        if not dedans or not os.path.isfile(target):
             return self.json_err(404, "Introuvable")
         ctype = mimetypes.guess_type(target)[0] or "application/octet-stream"
         with open(target, "rb") as fh:
